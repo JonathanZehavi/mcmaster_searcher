@@ -1,0 +1,55 @@
+name: Test and build
+
+# Every push to master: run the tests, then publish fresh Windows / Mac files
+# to the "latest" release, so the download links in the README always point
+# at the newest version.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The runner image ships Google Chrome, which the browser tests drive.
+      - name: Test
+        run: go test -count=1 ./...
+        env:
+          MCM_NO_SANDBOX: "1"
+
+      - name: Build
+        run: |
+          VERSION="$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}"
+          FLAGS="-s -w -X main.version=$VERSION"
+          mkdir -p out
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$FLAGS" -o out/McMasterList.exe .
+          for arch in arm64 amd64; do
+            name=$([ $arch = arm64 ] && echo mac-apple-silicon || echo mac-intel)
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "$FLAGS" -o out/McMasterList .
+            (cd out && zip -q "McMasterList-$name.zip" McMasterList && rm McMasterList)
+          done
+          cp static/extractor.js out/extractor.js
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          ls -lh out
+
+      - name: Publish to the "latest" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/* \
+            --target "$GITHUB_SHA" \
+            --title "Latest ($VERSION)" \
+            --notes "Built automatically from ${GITHUB_SHA::7}. Windows: McMasterList.exe. Mac: the zip matching your chip. extractor.js: drop into the McMasterList-data folder to update detection without a new download."

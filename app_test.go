@@ -40,8 +40,7 @@ func newTestScraper(t *testing.T, base string) *Scraper {
 	if _, err := os.Stat("/opt/pw-browsers/chromium"); err == nil && os.Getenv("MCM_BROWSER_PATH") == "" {
 		t.Setenv("MCM_BROWSER_PATH", "/opt/pw-browsers/chromium")
 	}
-	js, _ := staticFS.ReadFile("static/extractor.js")
-	s := NewScraper(t.TempDir(), string(js))
+	s := NewScraper(t.TempDir())
 	if s.BrowserPath == "" && os.Getenv("CI") == "" {
 		if _, err := os.Stat("/usr/bin/chromium"); err != nil {
 			t.Skip("no browser available")
@@ -98,7 +97,7 @@ func newTestServer(t *testing.T, sc interface{ Lookup(string) (*Part, error) }) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewServer(store, sc, t.TempDir()))
+	srv := httptest.NewServer(NewServer(store, sc, t.TempDir(), Extractor{}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -244,3 +243,19 @@ func contains(xs []string, s string) bool {
 
 func itoa(i int) string { b, _ := json.Marshal(i); return string(b) }
 
+func TestExternalExtractorOverrides(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	if _, ext := s.Extractor.JS(); ext {
+		t.Fatal("no override file yet")
+	}
+	override := `() => ({partNumber: "91251A540", names: ["From override"], unit: "Each", price: "", image: "", blocked: false, notFound: false})`
+	os.WriteFile(s.Extractor.OverridePath, []byte(override), 0o644)
+	p, err := s.Lookup("91251A540")
+	if err != nil || p.Name != "From override" {
+		t.Fatalf("override not used: %+v %v", p, err)
+	}
+	os.WriteFile(s.Extractor.OverridePath, []byte("() => { syntax error"), 0o644)
+	if _, err := s.Lookup("91251A540"); err == nil || !strings.Contains(err.Error(), "extractor.js") {
+		t.Fatalf("broken override should be named in the error, got %v", err)
+	}
+}

@@ -1,3 +1,5 @@
 McMasterList-data/
 /mcmasterlist
 *.test
+dist/
+out/

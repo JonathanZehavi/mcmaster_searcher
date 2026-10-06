@@ -1,10 +1,24 @@
 # רשימת הזמנות McMaster
 
-קובץ אחד, `McMasterList.exe`, שרץ על Windows בלי שום התקנה. מכניסים מק״ט של McMaster-Carr, האתר מושך שם מוצר, יחידת מכירה (Each / Pack of N), מחיר ותמונה, בוחרים כמות ומוסיפים לרשימה. ביום חמישי אחראית הרכש מייצאת לאקסל (או מעתיקה להזמנה מהירה), מבצעת את ההזמנה ומסמנת "הוזמן".
+קובץ אחד שרץ על Windows או Mac בלי שום התקנה. מכניסים מק״ט של McMaster-Carr, האתר מושך שם מוצר, יחידת מכירה (Each / Pack of N), מחיר ותמונה, בוחרים כמות ומוסיפים לרשימה. ביום חמישי אחראית הרכש מייצאת לאקסל (או מעתיקה להזמנה מהירה), מבצעת את ההזמנה ומסמנת "הוזמן".
 
-## הפעלה
+## הורדה
 
-1. מורידים את [`dist/McMasterList.exe`](dist/McMasterList.exe) ושמים אותו בתיקייה קבועה, למשל `C:\McMaster\`.
+הגרסה העדכנית נבנית אוטומטית בכל שינוי בקוד:
+
+| מערכת | קובץ |
+|---|---|
+| Windows | [McMasterList.exe](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList.exe) |
+| Mac (M1/M2/M3/M4) | [McMasterList-mac-apple-silicon.zip](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList-mac-apple-silicon.zip) |
+| Mac (Intel) | [McMasterList-mac-intel.zip](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList-mac-intel.zip) |
+
+כל הגרסאות נמצאות ב[דף ההורדות](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest).
+
+**הגרסה לא מתאימה לכל מחשב.** מריצים את הקובץ על מחשב אחד בלבד (ראו "כמה מחשבים" למטה). מחשבי Mac ו-Windows אחרים נכנסים אליו מהדפדפן ולא צריכים להוריד כלום.
+
+## הפעלה ב-Windows
+
+1. שמים את `McMasterList.exe` בתיקייה קבועה, למשל `C:\McMaster\`.
 2. לוחצים עליו פעמיים. הדפדפן נפתח לבד בכתובת `http://localhost:5000`.
 3. **החלון השחור הוא השרת. לא לסגור אותו.** סגירה שלו מכבה את האתר.
 
@@ -13,6 +27,14 @@
 - **חומת האש (Firewall)**: לוחצים Allow רק אם מחשבים אחרים במשרד צריכים להתחבר. אם לוחצים Cancel, האתר יעבוד רק מהמחשב הזה.
 
 כדי שהאתר יעלה אוטומטית עם הדלקת המחשב: מקישים `Win+R`, כותבים `shell:startup`, ושמים בתיקייה שנפתחת קיצור דרך לקובץ.
+
+## הפעלה ב-Mac
+
+1. פותחים את קובץ ה-zip ומעבירים את `McMasterList` לתיקייה קבועה.
+2. לוחצים פעמיים. בפעם הראשונה macOS יחסום את הקובץ, כי הוא לא חתום אצל Apple. נכנסים ל-**System Settings ← Privacy & Security**, גוללים למטה ולוחצים **Open Anyway**. אחר כך לוחצים שוב פעמיים על הקובץ.
+   דרך חלופית מה-Terminal: `xattr -dr com.apple.quarantine McMasterList`
+3. נפתח חלון Terminal, והוא השרת. לא לסגור אותו.
+4. צריך Chrome או Edge מותקן. עם Safari בלבד החיפוש האוטומטי לא יעבוד.
 
 ## כמה מחשבים
 
@@ -31,7 +53,11 @@
 
 ## כשהחיפוש האוטומטי מפסיק לעבוד
 
-בכל כישלון נשמרים בתיקייה `McMasterList-data\debug\` קובץ HTML וצילום מסך של מה שהדפדפן ראה. עם הקבצים האלה מעדכנים את הזיהוי בקובץ `static/extractor.js` ובונים את ה-exe מחדש. בזמן הזה הכפתור המהיר והמילוי הידני ממשיכים לעבוד.
+1. בכל כישלון נשמרים בתיקייה `McMasterList-data\debug\` קובץ HTML וצילום מסך של מה שהדפדפן ראה. את הקבצים האלה שולחים למי שמתחזק את הקוד.
+2. התיקון מגיע כקובץ אחד, `extractor.js` (הגרסה העדכנית נמצאת תמיד [כאן](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/extractor.js)). **שמים אותו בתיקייה `McMasterList-data`** שליד הקובץ. התיקון נכנס לתוקף בחיפוש הבא, בלי להוריד גרסה חדשה ובלי להפעיל מחדש.
+3. כדי לחזור לזיהוי המובנה מוחקים את הקובץ.
+
+בינתיים הכפתור המהיר והמילוי הידני ממשיכים לעבוד.
 
 הפתרון היציב לטווח ארוך הוא [ה-API הרשמי של McMaster](https://www.mcmaster.com/help/api/), שדורש אישור על החשבון העסקי.
 
@@ -48,9 +74,11 @@
 
 ## פיתוח
 
-נכתב ב-Go. דף האתר (`static/`) נארז בתוך ה-exe.
+נכתב ב-Go. דף האתר (`static/`) נארז בתוך הקובץ. הזיהוי בדף המוצר נמצא בקובץ אחד, `static/extractor.js`.
 
 ```
-go test ./...                                                     # בדיקות מול אתר McMaster מדומה (testdata/)
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/McMasterList.exe .
+go test ./...          # בדיקות, כולל דפדפן אמיתי מול אתר McMaster מדומה (testdata/)
+go run .               # הרצה מקומית
 ```
+
+כל push ל-`master` מריץ את הבדיקות ב-GitHub Actions (`.github/workflows/build.yml`), ואם הן עוברות, בונה קבצים ל-Windows ול-Mac ומפרסם אותם ב-release `latest`.

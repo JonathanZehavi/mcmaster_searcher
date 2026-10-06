@@ -30,11 +30,12 @@ type Server struct {
 	store   *Store
 	scraper interface{ Lookup(string) (*Part, error) }
 	images  string
+	ext     Extractor
 	mux     *http.ServeMux
 }
 
-func NewServer(store *Store, scraper interface{ Lookup(string) (*Part, error) }, imagesDir string) *Server {
-	s := &Server{store: store, scraper: scraper, images: imagesDir, mux: http.NewServeMux()}
+func NewServer(store *Store, scraper interface{ Lookup(string) (*Part, error) }, imagesDir string, ext Extractor) *Server {
+	s := &Server{store: store, scraper: scraper, images: imagesDir, ext: ext, mux: http.NewServeMux()}
 	static, _ := fs.Sub(staticFS, "static")
 	index := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -101,6 +102,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := s.scraper.Lookup(pn)
 	if err != nil {
+		log.Printf("lookup %s: %v", pn, err)
 		msg := "שגיאה בחיפוש: " + err.Error()
 		var le *LookupError
 		if errors.As(err, &le) {
@@ -109,6 +111,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 502, J{"ok": false, "error": msg, "url": manualURL(pn)})
 		return
 	}
+	log.Printf("lookup %s: ok (%s / %s)", pn, p.Name, p.Unit)
 	s.store.SavePart(*p)
 	writeJSON(w, 200, J{"ok": true, "part": partPayload(p, false)})
 }
@@ -264,9 +267,9 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bookmarklet(w http.ResponseWriter, r *http.Request) {
-	src, _ := staticFS.ReadFile("static/extractor.js")
+	src, _ := s.ext.JS()
 	var lines []string
-	for _, l := range strings.Split(string(src), "\n") {
+	for _, l := range strings.Split(src, "\n") {
 		if !strings.HasPrefix(strings.TrimSpace(l), "//") {
 			lines = append(lines, strings.TrimRight(l, "\r"))
 		}
@@ -323,6 +326,8 @@ func fail(msg string) {
 	os.Exit(1)
 }
 
+var version = "dev" // set at build time
+
 func main() {
 	port := envOr("MCM_PORT", "5000")
 	host := envOr("MCM_HOST", "0.0.0.0")
@@ -347,12 +352,11 @@ func main() {
 	if err != nil {
 		fail("cannot open data file: " + err.Error())
 	}
-	extractor, _ := staticFS.ReadFile("static/extractor.js")
-	scraper := NewScraper(dir, string(extractor))
-	srv := NewServer(store, scraper, scraper.ImagesDir)
+	scraper := NewScraper(dir)
+	srv := NewServer(store, scraper, scraper.ImagesDir, scraper.Extractor)
 
 	fmt.Println()
-	fmt.Println("  McMaster order list is running.  Keep this window open; close it to stop.")
+	fmt.Println("  McMaster order list " + version + " is running.  Keep this window open; close it to stop.")
 	fmt.Println()
 	fmt.Println("    On this computer:    " + localURL)
 	if host == "0.0.0.0" {
@@ -361,6 +365,9 @@ func main() {
 		}
 	}
 	fmt.Println("    Data folder:         " + dir)
+	if _, external := scraper.Extractor.JS(); external {
+		fmt.Println("    Detection:           external extractor.js from the data folder")
+	}
 	fmt.Println()
 	if !noOpen {
 		openBrowser(localURL)

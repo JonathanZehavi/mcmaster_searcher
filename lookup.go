@@ -57,13 +57,13 @@ type Scraper struct {
 	ProfileDir  string
 	ImagesDir   string
 	DebugDir    string
-	extractorJS string
+	Extractor   Extractor
 
 	mu   sync.Mutex
 	last time.Time
 }
 
-func NewScraper(dataDir, extractorJS string) *Scraper {
+func NewScraper(dataDir string) *Scraper {
 	s := &Scraper{
 		BaseURL:     strings.TrimRight(envOr("MCM_BASE_URL", "https://www.mcmaster.com"), "/"),
 		BrowserPath: envOr("MCM_BROWSER_PATH", findBrowser()),
@@ -73,7 +73,7 @@ func NewScraper(dataDir, extractorJS string) *Scraper {
 		ProfileDir:  filepath.Join(dataDir, "browser-profile"),
 		ImagesDir:   filepath.Join(dataDir, "images"),
 		DebugDir:    filepath.Join(dataDir, "debug"),
-		extractorJS: extractorJS,
+		Extractor:   Extractor{OverridePath: filepath.Join(dataDir, "extractor.js")},
 	}
 	for _, d := range []string{s.ProfileDir, s.ImagesDir, s.DebugDir} {
 		os.MkdirAll(d, 0o755)
@@ -82,6 +82,7 @@ func NewScraper(dataDir, extractorJS string) *Scraper {
 }
 
 // findBrowser returns Chrome if installed, else Edge (which ships with Windows).
+// Elsewhere chromedp's own search covers Chromium.
 func findBrowser() string {
 	var candidates []string
 	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LocalAppData"} {
@@ -94,6 +95,9 @@ func findBrowser() string {
 			candidates = append(candidates, filepath.Join(base, `Microsoft\Edge\Application\msedge.exe`))
 		}
 	}
+	candidates = append(candidates,
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c
@@ -126,6 +130,9 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 		opts = append(opts, chromedp.Flag("headless", "new"))
 	} else {
 		opts = append(opts, chromedp.Flag("headless", false))
+	}
+	if os.Getenv("MCM_NO_SANDBOX") == "1" { // CI containers only
+		opts = append(opts, chromedp.NoSandbox)
 	}
 	if s.BrowserPath != "" {
 		opts = append(opts, chromedp.ExecPath(s.BrowserPath))
@@ -161,8 +168,12 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 	_ = chromedp.Run(ctx, chromedp.Sleep(800*time.Millisecond))
 
 	var data extracted
-	if err := chromedp.Run(ctx, chromedp.Evaluate("("+s.extractorJS+")()", &data)); err != nil {
+	js, external := s.Extractor.JS()
+	if err := chromedp.Run(ctx, chromedp.Evaluate("("+js+"\n)()", &data)); err != nil {
 		debug := s.saveDebug(ctx, pn)
+		if external {
+			return nil, &LookupError{fmt.Sprintf("קובץ הזיהוי החיצוני (extractor.js) נכשל: %s (נשמר דיבאג: %s).", firstLine(err.Error()), debug)}
+		}
 		return nil, &LookupError{fmt.Sprintf("הדף של McMaster לא נטען (נשמר דיבאג: %s).", debug)}
 	}
 	if data.Blocked || data.NotFound || len(data.Names) == 0 {
