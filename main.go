@@ -45,6 +45,9 @@ func NewServer(store *Store, scraper interface{ Lookup(string) (*Part, error) },
 	s.mux.HandleFunc("GET /add", index)
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	s.mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir(imagesDir))))
+	s.mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, J{"app": appID, "version": version})
+	})
 	s.mux.HandleFunc("GET /api/lookup", s.lookup)
 	s.mux.HandleFunc("GET /api/items", s.listItems)
 	s.mux.HandleFunc("POST /api/items", s.addItem)
@@ -328,24 +331,46 @@ func fail(msg string) {
 
 var version = "dev" // set at build time
 
+const appID = "mcmaster-order-list"
+
+// alreadyRunning reports whether the program on this port is this app.
+func alreadyRunning(port int) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ping", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var out struct{ App string }
+	return json.NewDecoder(resp.Body).Decode(&out) == nil && out.App == appID
+}
+
 func main() {
-	port := envOr("MCM_PORT", "5000")
+	startPort, _ := strconv.Atoi(envOr("MCM_PORT", "8642"))
 	host := envOr("MCM_HOST", "0.0.0.0")
-	localURL := "http://localhost:" + port
 	noOpen := os.Getenv("MCM_NO_OPEN") == "1"
 
-	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
-	if err != nil {
-		// Probably already running (double-clicked twice): just open it.
-		if c, derr := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second); derr == nil {
-			c.Close()
+	// Find a free port. A busy port is either this app already running (then
+	// just open it) or another program, e.g. macOS AirPlay on 5000 (then move on).
+	var ln net.Listener
+	port := startPort
+	for ; port < startPort+20; port++ {
+		var err error
+		if ln, err = net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port))); err == nil {
+			break
+		}
+		if alreadyRunning(port) {
+			fmt.Printf("\n  Already running at http://localhost:%d - opening it.\n", port)
 			if !noOpen {
-				openBrowser(localURL)
+				openBrowser(fmt.Sprintf("http://localhost:%d", port))
 			}
 			return
 		}
-		fail(fmt.Sprintf("port %s is busy: %v", port, err))
 	}
+	if ln == nil {
+		fail(fmt.Sprintf("no free port between %d and %d", startPort, startPort+19))
+	}
+	localURL := fmt.Sprintf("http://localhost:%d", port)
 
 	dir := dataDir()
 	store, err := OpenStore(filepath.Join(dir, "orders.json"))
@@ -361,7 +386,7 @@ func main() {
 	fmt.Println("    On this computer:    " + localURL)
 	if host == "0.0.0.0" {
 		for _, ip := range lanAddresses() {
-			fmt.Printf("    Other computers:     http://%s:%s\n", ip, port)
+			fmt.Printf("    Other computers:     http://%s:%d\n", ip, port)
 		}
 	}
 	fmt.Println("    Data folder:         " + dir)
