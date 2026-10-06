@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>רשימת הזמנות McMaster</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>רשימת הזמנות McMaster</h1>
+    <nav>
+      <button class="tab active" data-tab="add">הוספה ורשימה</button>
+      <button class="tab" data-tab="history">הזמנות קודמות</button>
+      <button class="tab" data-tab="help">כפתור מהיר</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-add">
+      <form id="lookup-form" class="card">
+        <label for="pn">מק״ט</label>
+        <div class="row">
+          <input id="pn" dir="ltr" autocomplete="off" placeholder="91251A540" autofocus>
+          <button type="submit" id="lookup-btn">חפש</button>
+        </div>
+        <p id="lookup-status" class="status"></p>
+      </form>
+
+      <form id="item-form" class="card hidden">
+        <div class="product">
+          <div class="thumb"><img id="f-img" alt=""><span id="f-noimg">אין תמונה</span></div>
+          <div class="fields">
+            <div class="pn-line">
+              <span id="f-pn" dir="ltr"></span>
+              <a id="f-link" target="_blank" rel="noopener">פתח ב-McMaster ↗</a>
+              <button type="button" id="refresh-btn" class="link">רענן פרטים</button>
+            </div>
+            <label for="f-name">שם מוצר</label>
+            <input id="f-name" dir="ltr" list="name-options" required>
+            <datalist id="name-options"></datalist>
+            <div class="grid">
+              <div>
+                <label for="f-unit">יחידת מכירה</label>
+                <input id="f-unit" dir="ltr" list="unit-options" placeholder="Each / Pack of 100">
+                <datalist id="unit-options"><option value="Each"><option value="Pack of 10"><option value="Pack of 25"><option value="Pack of 50"><option value="Pack of 100"></datalist>
+              </div>
+              <div>
+                <label for="f-qty">כמות <small id="f-qty-hint"></small></label>
+                <input id="f-qty" type="number" min="1" value="1" required>
+              </div>
+              <div>
+                <label for="f-price">מחיר ליחידה ($)</label>
+                <input id="f-price" dir="ltr" readonly>
+              </div>
+            </div>
+            <div class="grid two">
+              <div>
+                <label for="f-requester">מי מבקש</label>
+                <input id="f-requester">
+              </div>
+              <div>
+                <label for="f-note">הערה (פרויקט, דחיפות…)</label>
+                <input id="f-note">
+              </div>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary">הוסף לרשימה</button>
+              <button type="button" id="cancel-btn" class="link">ביטול</button>
+            </div>
+          </div>
+        </div>
+      </form>
+
+      <div class="card">
+        <div class="list-head">
+          <h2>רשימה פתוחה <span id="open-count" class="badge">0</span></h2>
+          <div class="list-actions">
+            <a class="btn" href="/api/export.xlsx?status=open">ייצוא לאקסל</a>
+            <button id="copy-btn" type="button" title="מק״ט וכמות בכל שורה, להדבקה בהזמנה מהירה ב-McMaster">העתק להזמנה מהירה</button>
+            <button id="ordered-btn" type="button" class="danger">סמן הכל כ"הוזמן"</button>
+          </div>
+        </div>
+        <table id="open-table">
+          <thead><tr><th></th><th>מק״ט</th><th>שם</th><th>יחידה</th><th>כמות</th><th>מבקש</th><th>הערה</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p id="open-empty" class="empty">הרשימה ריקה.</p>
+      </div>
+    </section>
+
+    <section id="tab-history" class="hidden">
+      <div class="card">
+        <div class="list-head">
+          <h2>הוזמנו</h2>
+          <a class="btn" href="/api/export.xlsx?status=ordered">ייצוא לאקסל</a>
+        </div>
+        <table id="history-table">
+          <thead><tr><th>תאריך הזמנה</th><th>מק״ט</th><th>שם</th><th>יחידה</th><th>כמות</th><th>מבקש</th><th>הערה</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-help" class="hidden">
+      <div class="card">
+        <h2>כפתור מהיר מתוך McMaster</h2>
+        <p>אם החיפוש האוטומטי נחסם או לא מזהה מוצר, אפשר להוסיף ישירות מהאתר של McMaster:</p>
+        <ol>
+          <li>גרור את הכפתור הזה לסרגל הסימניות: <a id="bookmarklet" class="btn primary" href="#">➕ הוסף לרשימה</a></li>
+          <li>פתח את דף המוצר ב-McMaster (כתובת בסגנון <code dir="ltr">mcmaster.com/91251A540/</code>).</li>
+          <li>לחץ על הסימניה – ייפתח כאן טופס מלא עם שם, יחידה ותמונה. בחר כמות והוסף.</li>
+        </ol>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
