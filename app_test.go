@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var png1x1, _ = base64.StdEncoding.DecodeString(
@@ -40,7 +41,7 @@ func newTestScraper(t *testing.T, base string) *Scraper {
 	if _, err := os.Stat("/opt/pw-browsers/chromium"); err == nil && os.Getenv("MCM_BROWSER_PATH") == "" {
 		t.Setenv("MCM_BROWSER_PATH", "/opt/pw-browsers/chromium")
 	}
-	s := NewScraper(t.TempDir())
+	s := NewScraper(browserTempDir(t))
 	if s.BrowserPath == "" && os.Getenv("CI") == "" {
 		if _, err := os.Stat("/usr/bin/chromium"); err != nil {
 			t.Skip("no browser available")
@@ -76,6 +77,24 @@ func TestScraperReportsBlockAndSavesDebug(t *testing.T) {
 	if m, _ := filepath.Glob(filepath.Join(s.DebugDir, "1234K56-*.html")); len(m) == 0 {
 		t.Fatal("debug html not saved")
 	}
+}
+
+// browserTempDir is like t.TempDir, but tolerates Chrome's helper processes
+// still writing to the profile for a moment after the browser closes.
+func browserTempDir(t *testing.T) string {
+	dir, err := os.MkdirTemp("", "mcm-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 20; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	})
+	return dir
 }
 
 type countingScraper struct {
