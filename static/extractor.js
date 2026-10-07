@@ -86,22 +86,42 @@
 
   unit = clean(unit).replace(/^(\w)/, (c) => c.toUpperCase());
 
-  // --- image: og:image, else the largest product-looking image ---
-  let image = meta('meta[property="og:image"]') || "";
-  if (!image) {
-    let best = null;
-    let bestArea = 0;
-    document.querySelectorAll("img").forEach((img) => {
-      const src = img.currentSrc || img.src || "";
-      if (!src || src.startsWith("data:") || /logo|sprite|icon/i.test(src)) return;
-      const area = (img.naturalWidth || img.width || 0) * (img.naturalHeight || img.height || 0);
-      const bonus = /ImageCache|\/mv\d|product/i.test(src) ? 4 : 1;
-      if (area * bonus > bestArea) {
-        bestArea = area * bonus;
-        best = src;
-      }
-    });
-    if (best) image = best;
+  // --- image: the biggest product-looking picture on the page ---
+  // Scored by on-screen size, with bonuses for URLs that look like product
+  // images or contain the part number, and for sitting in the product area.
+  // The chosen element is tagged data-mcm-img so the app can photograph it if
+  // the file itself cannot be downloaded.
+  const notPicture = /logo|sprite|icon|blank|spacer|pixel|tracking|badge|flag|arrow|loading/i;
+  let image = "";
+  let imageReady = false;
+  let bestEl = null;
+  let bestScore = 0;
+  document.querySelectorAll("[data-mcm-img]").forEach((el) => el.removeAttribute("data-mcm-img"));
+  document.querySelectorAll("img").forEach((img) => {
+    const srcset = (img.getAttribute("srcset") || img.getAttribute("data-srcset") || "").trim().split(/\s+/)[0];
+    const src = img.currentSrc || img.getAttribute("src") || img.getAttribute("data-src") || srcset || "";
+    if (!src || src.startsWith("data:") || notPicture.test(src) || notPicture.test(img.alt || "")) return;
+    const box = img.getBoundingClientRect();
+    const w = Math.max(img.naturalWidth || 0, box.width, +img.getAttribute("width") || 0);
+    const h = Math.max(img.naturalHeight || 0, box.height, +img.getAttribute("height") || 0);
+    if (Math.max(w, h) < 60 || Math.min(w, h) < 30) return;
+    let score = w * h;
+    if (partNumber && src.toUpperCase().includes(partNumber)) score *= 8;
+    if (/ImageCache|WebParts|Contents\/gfx|\/mv\d|product|catalog/i.test(src)) score *= 4;
+    if (img.closest('[class*="ProductDetail"], [class*="prodDtl"], [class*="product" i], [id*="product" i], main')) score *= 2;
+    if (score > bestScore) {
+      bestScore = score;
+      bestEl = img;
+      image = src;
+    }
+  });
+  if (bestEl) {
+    bestEl.setAttribute("data-mcm-img", "1");
+    imageReady = bestEl.complete && bestEl.naturalWidth > 0;
+  } else {
+    // Metadata image only as a last resort (often a site logo).
+    const og = meta('meta[property="og:image"]') || "";
+    if (og && !notPicture.test(og)) image = og;
   }
   if (image) {
     try {
@@ -109,9 +129,11 @@
     } catch (e) {}
   }
 
-  const blocked =
-    /access denied|unusual traffic|are you a robot|captcha|request blocked/i.test(bodyText) || bodyText.length < 40;
+  // blockText: the page says it blocked us. blocked also covers a near-empty
+  // page (kept for the bookmarklet, where that means "nothing to read").
+  const blockText = /access denied|unusual traffic|are you a robot|captcha|request blocked/i.test(bodyText);
+  const blocked = blockText || bodyText.length < 40;
   const notFound = /no (?:products|results) (?:were )?found|not a valid part number|we couldn.t find/i.test(bodyText);
 
-  return { partNumber, names, headings, unit, price, tiers, image, url: location.href, blocked, notFound, textLength: bodyText.length };
+  return { partNumber, names, headings, unit, price, tiers, image, imageReady, url: location.href, blocked, blockText, notFound, textLength: bodyText.length };
 }

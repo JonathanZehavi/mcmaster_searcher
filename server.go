@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xuri/excelize/v2"
@@ -31,11 +32,44 @@ type Server struct {
 	ext      Extractor
 	mux      *http.ServeMux
 	debugDir string
+
+	flightMu sync.Mutex
+	flights  map[string]*flight
+}
+
+// flight is one lookup in progress; requests for the same part number while
+// it runs wait for it instead of queueing a second lookup.
+type flight struct {
+	done chan struct{}
+	part *Part
+	err  error
+}
+
+func (s *Server) lookupOnce(pn string) (*Part, error) {
+	s.flightMu.Lock()
+	if f, ok := s.flights[pn]; ok {
+		s.flightMu.Unlock()
+		<-f.done
+		return f.part, f.err
+	}
+	f := &flight{done: make(chan struct{})}
+	s.flights[pn] = f
+	s.flightMu.Unlock()
+
+	f.part, f.err = s.scraper.Lookup(pn)
+	if f.err == nil {
+		s.store.SavePart(*f.part)
+	}
+	s.flightMu.Lock()
+	delete(s.flights, pn)
+	s.flightMu.Unlock()
+	close(f.done)
+	return f.part, f.err
 }
 
 func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) *Server {
 	s := &Server{store: store, scraper: scraper, ext: ext, mux: http.NewServeMux(),
-		debugDir: filepath.Join(filepath.Dir(imagesDir), "debug")}
+		debugDir: filepath.Join(filepath.Dir(imagesDir), "debug"), flights: map[string]*flight{}}
 	static, _ := fs.Sub(staticFS, "static")
 	index := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -133,7 +167,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	p, err := s.scraper.Lookup(pn)
+	p, err := s.lookupOnce(pn)
 	if err != nil {
 		log.Printf("lookup %s: %v", pn, err)
 		msg := "שגיאה בחיפוש: " + err.Error()
@@ -145,7 +179,6 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("lookup %s: ok (%s / %s / %d price tiers)", pn, p.Name, p.Unit, len(p.Tiers))
-	s.store.SavePart(*p)
 	writeJSON(w, 200, J{"ok": true, "part": partPayload(p, false)})
 }
 

@@ -4,13 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>הזמנות McMaster</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <!-- ===== who are you (once per browser) ===== -->
   <div id="auth" class="auth hidden">
     <form id="who-form" class="card auth-card">
-      <h1>הזמנות McMaster</h1>
+      <div class="auth-brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8"/><path d="M10 21V11l6 6 6-6v10" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><div><h1>הזמנות McMaster</h1><p class="muted small">רשימת ההזמנות המשותפת של המשרד</p></div></div>
       <label for="who-input">מי אתה? (פעם אחת בלבד במחשב הזה)</label>
       <input id="who-input" dir="ltr" list="known-names" placeholder="John_Doe" autocomplete="off" required>
       <datalist id="known-names"></datalist>
@@ -26,97 +29,139 @@
 
   <!-- ===== app ===== -->
   <div id="app" class="hidden">
-    <header>
-      <h1>הזמנות McMaster</h1>
+    <header class="topbar">
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8"/><path d="M10 21V11l6 6 6-6v10" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><div class="brand-text"><b>הזמנות McMaster</b><span>רשימה משותפת · הזמנה שבועית</span></div></div>
       <nav id="tabs">
         <button class="tab active" data-tab="order">הזמנה</button>
         <button class="tab" data-tab="last">ההזמנה האחרונה שלי</button>
-        <button class="tab admin-only" data-tab="purchase">רכש – כל הרשימה</button>
+        <button class="tab admin-only" data-tab="purchase">רכש</button>
         <button class="tab admin-only" data-tab="history">היסטוריה</button>
         <button class="tab admin-only" data-tab="admin">ניהול</button>
         <button class="tab" data-tab="help">כפתור מהיר</button>
       </nav>
       <div class="who">
+        <span class="avatar" id="who-avatar"></span>
         <span id="who-name" dir="ltr"></span>
-        <button class="link light" id="notme-btn" title="המחשב ישכח את השם">לא אני</button>
+        <span class="who-sep"></span>
         <button class="link light" id="admin-btn"></button>
-        <button class="link light admin-only" id="pw-btn">שינוי סיסמה</button>
+        <button class="link light admin-only" id="pw-btn">סיסמה</button>
+        <button class="link light" id="notme-btn" title="המחשב ישכח את השם">לא אני</button>
       </div>
     </header>
 
     <main>
       <!-- ----- order: lookup + my current lines ----- -->
       <section id="tab-order">
-        <form id="lookup-form" class="card">
-          <label for="pn">מק״ט</label>
-          <div class="row">
-            <input id="pn" dir="ltr" autocomplete="off" placeholder="8336N108">
+        <div class="search-hero">
+          <h2>חיפוש מוצר לפי מק״ט</h2>
+          <p class="muted">הדבק או הקלד מק״ט של McMaster-Carr. שם, תמונה ומחיר יעלו אוטומטית.</p>
+          <form id="lookup-form" class="search-bar" autocomplete="off">
+            <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input id="pn" dir="ltr" placeholder="8336N108" spellcheck="false" aria-label="מק״ט">
+            <kbd class="kbd-hint" title="קיצור מקלדת">/</kbd>
             <button type="submit" id="lookup-btn" class="primary">חפש</button>
+          </form>
+          <div id="recent" class="recent"></div>
+          <p id="lookup-status" class="status" role="status"></p>
+        </div>
+
+        <div id="loading-card" class="card product-card is-loading hidden" aria-live="polite">
+          <div class="pc-media"><div class="pc-image shimmer"></div></div>
+          <div class="pc-body">
+            <div class="line shimmer w30"></div>
+            <div class="line shimmer w80 tall"></div>
+            <div class="line shimmer w60"></div>
+            <ol class="steps" id="load-steps">
+              <li data-step="0">מתחבר ל-McMaster</li>
+              <li data-step="1">טוען את דף המוצר</li>
+              <li data-step="2">קורא שם, מחיר ותמונה</li>
+            </ol>
+            <div class="progress"><span id="load-bar"></span></div>
+            <p class="muted small"><span id="load-secs">0</span> שניות · מק״ט שנבדק בעבר נטען מיד</p>
           </div>
-          <p id="lookup-status" class="status"></p>
-        </form>
+        </div>
 
-        <form id="item-form" class="card hidden">
-          <div class="product">
-            <div class="thumb"><img id="f-img" alt=""><span id="f-noimg">אין תמונה</span></div>
-            <div class="fields">
-              <div class="pn-line">
-                <span id="f-pn" dir="ltr"></span>
-                <a id="f-link" target="_blank" rel="noopener">פתח ב-McMaster ↗</a>
-                <button type="button" id="refresh-btn" class="link">רענן פרטים</button>
+        <form id="item-form" class="card product-card hidden">
+          <div class="pc-media">
+            <button type="button" class="pc-image" id="f-img-btn" title="הגדל תמונה">
+              <img id="f-img" alt="">
+              <span id="f-noimg" class="noimg">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/></svg>
+                אין תמונה
+              </span>
+            </button>
+            <a id="f-link" class="ghost-btn" target="_blank" rel="noopener">פתח ב-McMaster ↗</a>
+          </div>
+          <div class="pc-body">
+            <div class="pc-top">
+              <span class="pn-badge" id="f-pn" dir="ltr"></span>
+              <button type="button" id="copy-pn" class="icon-btn" title="העתק מק״ט">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+              </button>
+              <span class="spacer"></span>
+              <button type="button" id="refresh-btn" class="link small">↻ רענן פרטים</button>
+            </div>
+            <label for="f-name" class="sr-only">תיאור המוצר</label>
+            <input id="f-name" class="title-input" dir="ltr" list="name-options" placeholder="תיאור המוצר" required>
+            <datalist id="name-options"></datalist>
+
+            <div class="pc-specs">
+              <div class="field">
+                <label for="f-unit">יחידת מכירה</label>
+                <input id="f-unit" dir="ltr" list="unit-options" placeholder="Each / Pack of 25">
+                <datalist id="unit-options"><option value="Each"><option value="Pair"><option value="Pack of 10"><option value="Pack of 25"><option value="Pack of 50"><option value="Pack of 100"></datalist>
               </div>
-              <label for="f-name">תיאור המוצר</label>
-              <input id="f-name" dir="ltr" list="name-options" required>
-              <datalist id="name-options"></datalist>
+              <div class="field">
+                <label for="f-price">מחיר ליחידה ($)</label>
+                <input id="f-price" dir="ltr" inputmode="decimal" placeholder="0.00">
+              </div>
+            </div>
+            <div id="f-tiers" class="tiers hidden"></div>
 
-              <div class="grid four">
-                <div>
-                  <label for="f-unit">יחידת מכירה (UOM)</label>
-                  <input id="f-unit" dir="ltr" list="unit-options" placeholder="Each / Pack of 25">
-                  <datalist id="unit-options"><option value="Each"><option value="Pair"><option value="Pack of 10"><option value="Pack of 25"><option value="Pack of 50"><option value="Pack of 100"></datalist>
-                </div>
-                <div>
-                  <label for="f-qty">כמות <small id="f-qty-hint"></small></label>
+            <div class="pc-order">
+              <div class="field">
+                <label for="f-qty">כמות <small id="f-qty-hint" class="muted"></small></label>
+                <div class="stepper">
+                  <button type="button" data-step="-1" aria-label="פחות">−</button>
                   <input id="f-qty" type="number" min="1" value="1" required>
-                </div>
-                <div>
-                  <label for="f-price">מחיר ליחידה ($)</label>
-                  <input id="f-price" dir="ltr" inputmode="decimal">
-                </div>
-                <div>
-                  <label>סה״כ</label>
-                  <div id="f-total" class="total" dir="ltr">—</div>
+                  <button type="button" data-step="1" aria-label="יותר">+</button>
                 </div>
               </div>
-              <div id="f-tiers" class="tiers hidden"></div>
+              <div class="total-box">
+                <span>סה״כ לשורה</span>
+                <strong id="f-total" dir="ltr">—</strong>
+              </div>
+            </div>
 
-              <div class="grid three">
-                <div>
-                  <label for="f-requester">מזמין</label>
-                  <input id="f-requester" dir="ltr" readonly tabindex="-1">
-                </div>
-                <div>
-                  <label for="f-project">פרויקט</label>
-                  <select id="f-project" required></select>
-                </div>
-                <div>
-                  <label for="f-purpose">מטרה (בקצרה)</label>
-                  <input id="f-purpose" placeholder="למה צריך את זה">
-                </div>
+            <div class="grid three">
+              <div class="field">
+                <label for="f-requester">מזמין</label>
+                <input id="f-requester" dir="ltr" readonly tabindex="-1">
               </div>
-              <p class="muted small">תאריך: <span id="f-date"></span></p>
-              <div class="actions">
-                <button type="submit" class="primary">הוסף לרשימה</button>
-                <button type="button" id="cancel-btn" class="link">ביטול</button>
+              <div class="field">
+                <label for="f-project">פרויקט</label>
+                <select id="f-project" required></select>
               </div>
+              <div class="field">
+                <label for="f-purpose">מטרה (בקצרה)</label>
+                <input id="f-purpose" placeholder="למה צריך את זה">
+              </div>
+            </div>
+            <div class="actions">
+              <span class="muted small">תאריך: <span id="f-date"></span></span>
+              <span class="spacer"></span>
+              <button type="button" id="cancel-btn" class="link">ביטול</button>
+              <button type="submit" class="primary big">הוסף לרשימה</button>
             </div>
           </div>
         </form>
 
         <div class="card">
           <div class="list-head">
-            <h2>הפריטים שלי ברשימה הנוכחית <span id="mine-count" class="badge">0</span></h2>
-            <span class="muted small">הרשימה נסגרת כשהרכש מבצע את ההזמנה.</span>
+            <div>
+              <h2>הפריטים שלי ברשימה הנוכחית <span id="mine-count" class="badge">0</span></h2>
+              <p class="muted small">אפשר לשנות כמות או למחוק עד שהרכש מבצע את ההזמנה.</p>
+            </div>
           </div>
           <div class="table-wrap"><table id="mine-table"></table></div>
         </div>
@@ -237,6 +282,11 @@
         <button class="link" value="cancel" formnovalidate>ביטול</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="img-dialog" class="img-dialog">
+    <form method="dialog"><button class="icon-btn close" aria-label="סגור">✕</button></form>
+    <img id="img-big" alt="">
   </dialog>
 
   <div id="toast" class="toast hidden"></div>

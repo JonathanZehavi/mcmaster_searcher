@@ -7,15 +7,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -24,18 +29,46 @@ var png1x1, _ = base64.StdEncoding.DecodeString(
 
 // ---------- fake McMaster + real browser ----------
 
+// redPNG is a visible 40x40 image, so a screenshot of it is not empty.
+func redPNG() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 40, 40))
+	for i := range img.Pix {
+		img.Pix[i] = []byte{220, 30, 30, 255}[i%4]
+	}
+	var buf bytes.Buffer
+	png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
 func fakeMcMaster(t *testing.T) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasPrefix(r.URL.Path, "/img/protected"):
+			// Like a site that refuses downloads: only an <img> on the page gets it.
+			if r.Header.Get("Sec-Fetch-Dest") != "image" {
+				http.Error(w, "forbidden", 403)
+				return
+			}
+			w.Header().Set("Content-Type", "image/png")
+			w.Write(redPNG())
 		case strings.HasPrefix(r.URL.Path, "/img/"):
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(png1x1)
+		case strings.HasPrefix(r.URL.Path, "/cdn/app.js"):
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Write([]byte(`document.getElementById("app").innerHTML = "<h1>CDN Rendered Washer</h1><div>$1.25 Each</div>";`))
 		case strings.HasPrefix(r.URL.Path, "/91251A540"):
 			http.ServeFile(w, r, "testdata/product.html")
 		case strings.HasPrefix(r.URL.Path, "/8336N108"):
 			http.ServeFile(w, r, "testdata/tiered.html")
 		case strings.HasPrefix(r.URL.Path, "/94895A031"):
 			http.ServeFile(w, r, "testdata/slow.html")
+		case strings.HasPrefix(r.URL.Path, "/90107A010"):
+			b, _ := os.ReadFile("testdata/needs-cdn.html")
+			port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(strings.ReplaceAll(string(b), "__PORT__", port)))
 		default:
 			http.ServeFile(w, r, "testdata/blocked.html")
 		}
@@ -101,12 +134,57 @@ func TestScraperExtractsQuantityTiers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The image refuses downloads: it must come from a picture of the page.
+	b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile))
+	if err != nil || len(b) < 100 || !bytes.HasPrefix(b, []byte("\x89PNG")) {
+		t.Fatalf("protected image not captured: file=%q err=%v size=%d", p.ImageFile, err, len(b))
+	}
 	want := []PriceTier{{Min: 1, Max: 11, Price: 28.46}, {Min: 12, Max: 0, Price: 25.93}}
 	if fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
 		t.Fatalf("tiers = %+v, want %+v (the 8-32 thread size must not count)", p.Tiers, want)
 	}
 	if p.Unit != "Pair" {
 		t.Fatalf("unit from the tier rows should win over a stray 'Each': %q", p.Unit)
+	}
+}
+
+func TestNetworkDietRules(t *testing.T) {
+	s := &Scraper{siteHost: "mcmaster.com"}
+	st := &tabStats{thirdParty: map[string]bool{}, allow: map[string]bool{}}
+	for _, c := range []struct {
+		url   string
+		rt    network.ResourceType
+		block bool
+	}{
+		{"https://www.mcmaster.com/static/app.js", network.ResourceTypeScript, false},
+		{"https://images.mcmaster.com/x.png", network.ResourceTypeImage, false},
+		{"https://cdn.other.com/pic.png", network.ResourceTypeImage, false}, // images always load
+		{"https://www.mcmaster.com/font.woff2", network.ResourceTypeFont, true},
+		{"https://chat.widget.io/loader.js", network.ResourceTypeScript, true},
+		{"https://stats.example/collect", network.ResourceTypeXHR, true},
+		{"https://evilmcmaster.com/x.js", network.ResourceTypeScript, true}, // not a subdomain
+	} {
+		if got := s.shouldBlock(c.url, c.rt, st); got != c.block {
+			t.Errorf("%s (%s): block=%v, want %v", c.url, c.rt, got, c.block)
+		}
+	}
+	st.allowURL("https://cdn.other.com/fetch-me.png")
+	if s.shouldBlock("https://cdn.other.com/fetch-me.png", network.ResourceTypeFetch, st) {
+		t.Error("the product image URL must be fetchable even from another host")
+	}
+}
+
+// A page that only renders with a script from another host: the diet breaks
+// it, so the lookup retries without the diet, succeeds, and keeps it off.
+func TestNetworkDietFallsBack(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	s.Timeout = 4 * time.Second
+	p, err := s.Lookup("90107A010")
+	if err != nil || p.Name != "CDN Rendered Washer" {
+		t.Fatalf("got %+v, %v", p, err)
+	}
+	if !s.dietOff {
+		t.Fatal("diet should be off after it broke a page")
 	}
 }
 
@@ -528,4 +606,30 @@ func TestOfficeAccessCode(t *testing.T) {
 	}
 	c.mustOK("POST", "/api/identify", map[string]any{"name": "John_Doe", "code": "office-" + testPW("code")})
 	c.mustOK("GET", "/api/items", nil)
+}
+
+type slowStub struct{ calls atomic.Int32 }
+
+func (s *slowStub) Lookup(pn string) (*Part, error) {
+	s.calls.Add(1)
+	time.Sleep(300 * time.Millisecond)
+	return &Part{PartNumber: pn, Name: "Slow Part", Source: "auto"}, nil
+}
+
+// A paste and a click on "search" for the same part share one lookup.
+func TestConcurrentLookupsShareOne(t *testing.T) {
+	sc := &slowStub{}
+	_, _, dana, _ := world(t, sc)
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dana.mustOK("GET", "/api/lookup?pn=5000N12", nil)
+		}()
+	}
+	wg.Wait()
+	if n := sc.calls.Load(); n != 1 {
+		t.Fatalf("%d lookups for one part number", n)
+	}
 }

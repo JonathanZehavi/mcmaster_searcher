@@ -5,7 +5,7 @@ const state = { me: null, projects: [], part: null, mine: [], all: [] };
 function toast(msg, isError = false) {
   const t = $("#toast");
   t.textContent = msg;
-  t.className = "toast" + (isError ? " error" : "");
+  t.className = "toast " + (isError ? "error" : "ok");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => t.classList.add("hidden"), 3500);
 }
@@ -58,12 +58,19 @@ function showApp(data) {
   $("#auth").classList.add("hidden");
   $("#app").classList.remove("hidden");
   $("#who-name").textContent = state.me.name;
+  $("#who-avatar").textContent = state.me.name
+    .split(/[_\s.-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0].toUpperCase())
+    .join("");
   document.body.classList.toggle("admin-mode", state.adminMode);
   $("#admin-btn").textContent = state.adminMode ? "יציאה ממצב מנהל" : state.hasAdmin ? "כניסת מנהל" : "הגדרת מנהל";
   // A manager tab that is no longer allowed falls back to the order tab.
   const active = document.querySelector(".tab.active");
   if (!state.adminMode && active && active.classList.contains("admin-only")) document.querySelector('.tab[data-tab="order"]').click();
   fillProjects();
+  renderRecent();
   loadMine();
   prefillFromBookmarklet();
 }
@@ -148,7 +155,8 @@ const COLS = {
 
 function renderTable(table, items, cols, emptyText) {
   if (!items.length) {
-    table.innerHTML = `<tbody><tr><td class="empty">${emptyText}</td></tr></tbody>`;
+    table.innerHTML = `<tbody><tr><td><div class="empty-state">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18l-2 11H5L3 7Z"/><path d="M8 7V5a4 4 0 0 1 8 0v2"/></svg>${emptyText}</div></td></tr></tbody>`;
     return;
   }
   table.innerHTML =
@@ -212,19 +220,21 @@ function updatePricing() {
   if (hasTiers && p.tiers.length > 1) {
     box.classList.remove("hidden");
     box.innerHTML =
-      "מחיר לפי כמות: " +
+      `<div class="tiers-head">מחיר ליחידה לפי כמות</div><div class="tiers-row">` +
       p.tiers
         .map((t) => {
           const active = qty >= t.min && (t.max === 0 || qty <= t.max);
-          return `<span class="tier${active ? " active" : ""}" dir="ltr">${tierLabel(t)}: ${money(t.price)}</span>`;
+          return `<div class="tier${active ? " active" : ""}"><span class="q" dir="ltr">${tierLabel(t)}</span><span class="p" dir="ltr">${money(t.price)}</span></div>`;
         })
-        .join("");
+        .join("") +
+      `</div>`;
   } else {
     box.classList.add("hidden");
   }
 }
 
 function showItemForm(part) {
+  stopLoading();
   state.part = part;
   $("#f-pn").textContent = part.part_number;
   $("#f-link").href = part.url || `https://www.mcmaster.com/${part.part_number}/`;
@@ -254,29 +264,88 @@ function showItemForm(part) {
   if (part.name) qty.select();
 }
 
+// ----- loading card: steps + seconds, so a long lookup visibly progresses -----
+let loadTimer = null;
+function startLoading() {
+  $("#item-form").classList.add("hidden");
+  $("#loading-card").classList.remove("hidden");
+  const started = Date.now();
+  const tick = () => {
+    const secs = Math.floor((Date.now() - started) / 1000);
+    $("#load-secs").textContent = secs;
+    const step = secs < 2 ? 0 : secs < 6 ? 1 : 2;
+    document.querySelectorAll("#load-steps li").forEach((li) => {
+      const n = +li.dataset.step;
+      li.className = n < step ? "done" : n === step ? "active" : "";
+    });
+    // Eases toward 90% over ~30 s; the last stretch completes when data arrives.
+    $("#load-bar").style.width = `${Math.min(90, 90 * (1 - Math.exp(-secs / 12)))}%`;
+  };
+  tick();
+  loadTimer = setInterval(tick, 500);
+}
+function stopLoading() {
+  clearInterval(loadTimer);
+  loadTimer = null;
+  $("#loading-card").classList.add("hidden");
+}
+
+// ----- recent searches (this browser) -----
+function recentList() {
+  try {
+    return JSON.parse(localStorage.getItem("recent") || "[]");
+  } catch {
+    return [];
+  }
+}
+function rememberRecent(pn) {
+  const list = [pn, ...recentList().filter((x) => x !== pn)].slice(0, 6);
+  try {
+    localStorage.setItem("recent", JSON.stringify(list));
+  } catch {}
+  renderRecent();
+}
+function renderRecent() {
+  const list = recentList();
+  $("#recent").innerHTML = list.length
+    ? `<span class="label">חיפושים אחרונים:</span>` + list.map((pn) => `<button type="button" class="chip-btn" data-pn="${esc(pn)}">${esc(pn)}</button>`).join("")
+    : "";
+}
+$("#recent").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pn]");
+  if (!b) return;
+  $("#pn").value = b.dataset.pn;
+  lookup();
+});
+
 async function lookup(refresh = false) {
   const pn = $("#pn").value.trim();
   if (!pn) return;
   const status = $("#lookup-status");
   status.className = "status";
-  status.textContent = refresh ? "מרענן מ-McMaster…" : "מחפש… (בדיקה ראשונה של מק״ט לוקחת כ-10–20 שניות)";
+  status.textContent = "";
   $("#lookup-btn").disabled = true;
+  startLoading();
   try {
     const data = await api(`/api/lookup?pn=${encodeURIComponent(pn)}${refresh ? "&refresh=1" : ""}`);
     if (data.ok) {
-      status.textContent = data.part.cached ? "נמצא (נבדק בעבר)." : "נמצא.";
+      rememberRecent(data.part.part_number);
+      status.className = "status ok";
+      status.textContent = data.part.cached ? "✓ נטען מהזיכרון (נבדק בעבר)" : "✓ נמצא ב-McMaster";
       showItemForm(data.part);
     } else {
+      stopLoading();
       status.className = "status error";
       status.innerHTML =
         esc(data.error) +
-        (data.url ? ` <a href="${esc(data.url)}" target="_blank" rel="noopener">פתח ב-McMaster</a>, השתמש ב<a href="#" data-goto="help">כפתור המהיר</a>, או מלא ידנית למטה.` : "");
+        (data.url ? `<br><a href="${esc(data.url)}" target="_blank" rel="noopener">פתח ב-McMaster</a> · <a href="#" data-goto="help">כפתור מהיר</a> · או מלא ידנית למטה` : "");
       if (data.url) {
         const clean = pn.replace(/[^0-9a-z]/gi, "").toUpperCase();
         showItemForm({ part_number: clean, url: data.url, name: "", unit: "", tiers: [], image: "" });
       }
     }
   } catch (e) {
+    stopLoading();
     if (e.message !== "unauthorized") {
       status.className = "status error";
       status.textContent = "השרת לא זמין.";
@@ -285,6 +354,45 @@ async function lookup(refresh = false) {
     $("#lookup-btn").disabled = false;
   }
 }
+
+// Pasting a part number searches right away; "/" jumps to the search box.
+$("#pn").addEventListener("paste", () => setTimeout(() => /^[0-9]{1,6}[a-z][0-9]{1,6}$/i.test($("#pn").value.trim()) && lookup(), 0));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && !$("#app").classList.contains("hidden")) {
+    e.preventDefault();
+    document.querySelector('.tab[data-tab="order"]').click();
+    $("#pn").focus();
+    $("#pn").select();
+  }
+});
+
+// Quantity +/- buttons.
+document.querySelectorAll(".stepper [data-step]").forEach((b) =>
+  b.addEventListener("click", () => {
+    const q = $("#f-qty");
+    q.value = Math.max(1, (parseInt(q.value, 10) || 1) + +b.dataset.step);
+    updatePricing();
+  })
+);
+
+$("#copy-pn").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#f-pn").textContent);
+    toast("המק״ט הועתק.");
+  } catch {}
+});
+
+// Click the picture to see it large.
+$("#f-img-btn").addEventListener("click", () => {
+  const src = $("#f-img").getAttribute("src");
+  if (!src) return;
+  $("#img-big").src = src;
+  $("#img-dialog").showModal();
+});
+$("#f-img").addEventListener("error", () => {
+  $("#f-img").style.display = "none";
+  $("#f-noimg").style.display = "";
+});
 
 $("#lookup-form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -299,6 +407,8 @@ $("#f-price").addEventListener("input", updatePricing);
 $("#f-unit").addEventListener("input", () => ($("#f-qty-hint").textContent = packHint($("#f-unit").value)));
 $("#cancel-btn").addEventListener("click", () => {
   $("#item-form").classList.add("hidden");
+  $("#lookup-status").textContent = "";
+  $("#lookup-status").className = "status";
   $("#pn").select();
 });
 document.addEventListener("click", (e) => {
@@ -331,9 +441,10 @@ $("#item-form").addEventListener("submit", async (e) => {
     },
   });
   if (!data.ok) return toast(data.error, true);
-  toast("נוסף לרשימה.");
+  toast("✓ נוסף לרשימה.");
   $("#item-form").classList.add("hidden");
   $("#lookup-status").textContent = "";
+  $("#lookup-status").className = "status";
   $("#pn").value = "";
   $("#pn").focus();
   loadMine();
