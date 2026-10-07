@@ -34,6 +34,8 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			http.ServeFile(w, r, "testdata/product.html")
 		case strings.HasPrefix(r.URL.Path, "/8336N108"):
 			http.ServeFile(w, r, "testdata/tiered.html")
+		case strings.HasPrefix(r.URL.Path, "/94895A031"):
+			http.ServeFile(w, r, "testdata/slow.html")
 		default:
 			http.ServeFile(w, r, "testdata/blocked.html")
 		}
@@ -108,6 +110,24 @@ func TestScraperExtractsQuantityTiers(t *testing.T) {
 	}
 }
 
+// The site's marketing text is in the page metadata from the first moment;
+// it must neither become the name nor end the wait before the product renders.
+func TestScraperIgnoresSiteDescription(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	p, err := s.Lookup("94895A031")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "Slow Loading Hex Nut" || p.Unit != "Pack of 50" {
+		t.Fatalf("got %+v", p)
+	}
+	for _, n := range p.NameOptions {
+		if strings.Contains(n, "complete source") {
+			t.Fatalf("site description offered as a name: %v", p.NameOptions)
+		}
+	}
+}
+
 func TestScraperReportsBlockAndSavesDebug(t *testing.T) {
 	s := newTestScraper(t, fakeMcMaster(t).URL)
 	_, err := s.Lookup("1234K56")
@@ -121,7 +141,7 @@ func TestScraperReportsBlockAndSavesDebug(t *testing.T) {
 
 func TestExternalExtractorOverrides(t *testing.T) {
 	s := newTestScraper(t, fakeMcMaster(t).URL)
-	override := `() => ({partNumber: "91251A540", names: ["From override"], unit: "Each", tiers: [], image: "", blocked: false, notFound: false})`
+	override := `() => ({partNumber: "91251A540", names: ["From override"], headings: 1, unit: "Each", tiers: [], image: "", blocked: false, notFound: false})`
 	os.WriteFile(s.Extractor.OverridePath, []byte(override), 0o644)
 	p, err := s.Lookup("91251A540")
 	if err != nil || p.Name != "From override" {
@@ -457,6 +477,9 @@ func TestPagesAndBookmarklet(t *testing.T) {
 			t.Fatalf("%s: %v %v", p, err, resp)
 		}
 		resp.Body.Close()
+	}
+	if code, _ := dana.do("GET", "/api/debug.zip", nil); code != 403 {
+		t.Fatal("non-manager downloaded debug files")
 	}
 	href, _ := dana.mustOK("GET", "/api/bookmarklet", nil)["href"].(string)
 	if !strings.HasPrefix(href, "javascript:") || !strings.Contains(href, "add%3F") || strings.Contains(href, "#") {

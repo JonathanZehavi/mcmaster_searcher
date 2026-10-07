@@ -14,9 +14,12 @@
 
   // --- name candidates ---
   const names = [];
+  // McMaster's site-wide marketing text sits in every page's metadata from the
+  // first moment; it is never a product name.
+  const boilerplate = /complete source for your plant|ship from stock|deliver same or next day|^mcmaster-carr$|^welcome\b|^sign in\b|^log in\b/i;
   const push = (s) => {
     s = clean(s).replace(/\s*\|\s*McMaster-Carr\s*$/i, "").replace(/^McMaster-Carr\s*[-|:]?\s*/i, "");
-    if (s && s.length > 3 && s.length < 300 && !/^mcmaster-carr$/i.test(s) && !names.includes(s)) names.push(s);
+    if (s && s.length > 3 && s.length < 300 && !boilerplate.test(s) && !names.includes(s)) names.push(s);
   };
   const meta = (sel) => {
     const el = document.querySelector(sel);
@@ -27,6 +30,9 @@
     '[class*="ProductDetail"] h1, [class*="ProductDetail"] h2, [class*="prodDtl"] h1, [class*="prodDtl"] h2, [class*="Header"] h1'
   ).forEach((el) => push(el.innerText));
   document.querySelectorAll("h1, h2, h3").forEach((el) => push(el.innerText));
+  // How many names come from the page itself (rendered), not from metadata:
+  // only those mean the product has actually appeared.
+  const headings = names.length;
   push(meta('meta[property="og:title"]'));
   push(meta('meta[name="description"]'));
   push(document.title);
@@ -107,5 +113,5 @@
     /access denied|unusual traffic|are you a robot|captcha|request blocked/i.test(bodyText) || bodyText.length < 40;
   const notFound = /no (?:products|results) (?:were )?found|not a valid part number|we couldn.t find/i.test(bodyText);
 
-  return { partNumber, names, unit, price, tiers, image, url: location.href, blocked, notFound, textLength: bodyText.length };
+  return { partNumber, names, headings, unit, price, tiers, image, url: location.href, blocked, notFound, textLength: bodyText.length };
 }

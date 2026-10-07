@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,14 +26,16 @@ var staticFS embed.FS
 type Lookuper interface{ Lookup(string) (*Part, error) }
 
 type Server struct {
-	store   *Store
-	scraper Lookuper
-	ext     Extractor
-	mux     *http.ServeMux
+	store    *Store
+	scraper  Lookuper
+	ext      Extractor
+	mux      *http.ServeMux
+	debugDir string
 }
 
 func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) *Server {
-	s := &Server{store: store, scraper: scraper, ext: ext, mux: http.NewServeMux()}
+	s := &Server{store: store, scraper: scraper, ext: ext, mux: http.NewServeMux(),
+		debugDir: filepath.Join(filepath.Dir(imagesDir), "debug")}
 	static, _ := fs.Sub(staticFS, "static")
 	index := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -73,6 +79,7 @@ func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) 
 	s.mux.HandleFunc("GET /api/users", admin(s.listUsers))
 	s.mux.HandleFunc("PATCH /api/users/{id}", admin(s.updateUser))
 	s.mux.HandleFunc("PUT /api/projects", admin(s.setProjects))
+	s.mux.HandleFunc("GET /api/debug.zip", admin(s.debugZip))
 	return s
 }
 
@@ -444,10 +451,52 @@ func (s *Server) bookmarklet(w http.ResponseWriter, r *http.Request) {
 			lines = append(lines, strings.TrimRight(l, "\r"))
 		}
 	}
-	target := "http://" + r.Host + "/add?"
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" { // e.g. behind Render's https
+		scheme = "https"
+	}
+	target := scheme + "://" + r.Host + "/add?"
 	js := "(()=>{const d=(" + strings.TrimSpace(strings.Join(lines, "\n")) + ")();" +
 		"const pn=d.partNumber||prompt('Part number?');if(!pn)return;" +
 		"window.open('" + target + "'+new URLSearchParams({pn:pn,name:d.names[0]||''," +
 		"unit:d.unit||'',tiers:JSON.stringify(d.tiers||[]),image:d.image||'',src:'bookmarklet'}).toString(),'_blank');})();"
 	writeJSON(w, 200, J{"href": "javascript:" + strings.ReplaceAll(url.PathEscape(js), "+", "%2B")})
+}
+
+// GET /api/debug.zip: the newest failed-lookup snapshots (page HTML and
+// screenshot), so they can be sent for a detection fix even when the app runs
+// on a cloud server.
+func (s *Server) debugZip(w http.ResponseWriter, r *http.Request) {
+	entries, _ := os.ReadDir(s.debugDir)
+	type file struct {
+		name string
+		mod  time.Time
+	}
+	var files []file
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && !e.IsDir() {
+			files = append(files, file{e.Name(), info.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	if len(files) > 10 {
+		files = files[:10]
+	}
+	if len(files) == 0 {
+		http.Error(w, "no debug files yet", 404)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="mcmaster-debug-%s.zip"`, today()))
+	zw := zip.NewWriter(w)
+	for _, f := range files {
+		b, err := os.ReadFile(filepath.Join(s.debugDir, f.name))
+		if err != nil {
+			continue
+		}
+		if fw, err := zw.Create(f.name); err == nil {
+			fw.Write(b)
+		}
+	}
+	zw.Close()
 }

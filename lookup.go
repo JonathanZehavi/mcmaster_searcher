@@ -48,6 +48,7 @@ type extracted struct {
 	Blocked    bool        `json:"blocked"`
 	NotFound   bool        `json:"notFound"`
 	TextLength int         `json:"textLength"`
+	Headings   int         `json:"headings"` // names found in the rendered page, not metadata
 }
 
 // Scraper opens a McMaster-Carr product page in the computer's own Chrome or
@@ -283,8 +284,10 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 		evalErr = chromedp.Run(ctx, chromedp.Evaluate(expr, &d))
 		if evalErr == nil {
 			data = d
-			complete := len(d.Names) > 0 && (d.Price != "" || len(d.Tiers) > 0)
-			if len(d.Names) > 0 && namesSince.IsZero() {
+			// Metadata is there from the first moment; only a name in the
+			// rendered page means the product itself has appeared.
+			complete := d.Headings > 0 && (d.Price != "" || len(d.Tiers) > 0)
+			if d.Headings > 0 && namesSince.IsZero() {
 				namesSince = time.Now()
 			}
 			// Done: details are complete, the product has a name but shows no
@@ -312,7 +315,8 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 		}
 		return nil, &LookupError{fmt.Sprintf("הדף של McMaster לא נטען (נשמר דיבאג: %s).", debug)}
 	}
-	if data.Blocked || data.NotFound || len(data.Names) == 0 {
+	rendered := data.Headings > 0 || (len(data.Names) > 0 && (data.Price != "" || len(data.Tiers) > 0))
+	if data.Blocked || data.NotFound || !rendered {
 		debug := s.saveDebug(ctx, pn)
 		switch {
 		case data.NotFound:

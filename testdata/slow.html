@@ -1,0 +1,13 @@
+<!doctype html><html><head><title>McMaster-Carr</title>
+<meta name="description" content="McMaster-Carr is the complete source for your plant with over 595,000 products. 98% of products ordered ship from stock and deliver same or next day.">
+</head>
+<body><div id="app">Loading…</div>
+<script>
+// A slow product page: the site-wide description is there at once, the
+// product only renders after 4.5 seconds.
+setTimeout(() => {
+  document.getElementById('app').innerHTML = `
+   <h1>Slow Loading Hex Nut</h1>
+   <div>$3.10 per pack of 50</div>`;
+}, 4500);
+</script></body></html>
