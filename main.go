@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -18,15 +17,44 @@ import (
 
 // ---------- startup ----------
 
+// dataDir picks where the list, images and debug files live. The folder next
+// to the program comes first (easy to find and back up), but only if it can be
+// written: macOS keeps Terminal out of Downloads/Desktop/Documents by default.
+// Otherwise the per-user app-data folder, which is always writable:
+// ~/Library/Application Support/McMasterList on a Mac, %AppData%\McMasterList
+// on Windows.
 func dataDir() string {
 	if d := os.Getenv("MCM_DATA_DIR"); d != "" {
 		return d
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "McMasterList-data"
+	var candidates []string
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "McMasterList-data"))
 	}
-	return filepath.Join(filepath.Dir(exe), "McMasterList-data")
+	if cfg, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(cfg, "McMasterList"))
+	}
+	for _, c := range candidates {
+		if writable(c) {
+			return c
+		}
+	}
+	return "McMasterList-data"
+}
+
+func writable(dir string) bool {
+	if os.MkdirAll(dir, 0o755) != nil {
+		return false
+	}
+	probe := filepath.Join(dir, ".write-test")
+	if os.WriteFile(probe, []byte("ok"), 0o644) != nil {
+		return false
+	}
+	os.Remove(probe)
+	return true
 }
 
 func openBrowser(u string) {
@@ -51,12 +79,12 @@ func lanAddresses() []string {
 	return out
 }
 
+// fail shows the error and keeps the window open until Enter, so it can be
+// read (and photographed) instead of flashing by.
 func fail(msg string) {
-	fmt.Println("\n  שגיאה / Error:", msg)
-	if runtime.GOOS == "windows" {
-		fmt.Println("\n  Press Enter to close.")
-		fmt.Scanln()
-	}
+	fmt.Println("\n  Error:", msg)
+	fmt.Println("\n  Press Enter to close.")
+	fmt.Scanln()
 	os.Exit(1)
 }
 
@@ -103,6 +131,12 @@ func main() {
 	}
 	localURL := fmt.Sprintf("http://localhost:%d", port)
 
+	defer func() {
+		if r := recover(); r != nil {
+			fail(fmt.Sprint("unexpected crash: ", r))
+		}
+	}()
+
 	dir := dataDir()
 	store, err := OpenStore(filepath.Join(dir, "orders.json"))
 	if err != nil {
@@ -125,8 +159,12 @@ func main() {
 		fmt.Println("    Detection:           external extractor.js from the data folder")
 	}
 	fmt.Println()
+	fmt.Println("  If the browser did not open, copy the address above into it.")
+	fmt.Println()
 	if !noOpen {
 		openBrowser(localURL)
 	}
-	log.Fatal(http.Serve(ln, srv))
+	if err := http.Serve(ln, srv); err != nil {
+		fail("server stopped: " + err.Error())
+	}
 }

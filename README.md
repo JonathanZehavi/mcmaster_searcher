@@ -39,6 +39,7 @@
    דרך חלופית מה-Terminal: `xattr -dr com.apple.quarantine McMasterList`
 3. נפתח חלון Terminal, והוא השרת. לא לסגור אותו.
 4. צריך Chrome או Edge מותקן. עם Safari בלבד החיפוש האוטומטי לא יעבוד.
+5. אם macOS לא מרשה לכתוב ליד הקובץ (קורה ב-Downloads, Desktop ו-Documents), הנתונים נשמרים ב-`~/Library/Application Support/McMasterList`. המיקום בפועל מופיע בחלון בשורה "Data folder".
 
 ## משתמשים והרשאות
 
