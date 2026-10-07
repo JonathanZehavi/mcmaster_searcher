@@ -40,7 +40,12 @@ func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) 
 
 	s.mux.HandleFunc("GET /{$}", index)
 	s.mux.HandleFunc("GET /add", index)
-	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	// no-cache: after an update the browser must not mix a new page with old scripts.
+	files := http.StripPrefix("/static/", http.FileServerFS(static))
+	s.mux.HandleFunc("GET /static/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		files.ServeHTTP(w, r)
+	})
 	s.mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir(imagesDir))))
 	s.mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, J{"app": appID, "version": version})
