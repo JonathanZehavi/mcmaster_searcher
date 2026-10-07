@@ -1,18 +1,22 @@
 # Render Blueprint: Render -> New -> Blueprint -> pick this repository.
-# It builds the Dockerfile, gives the site an https address, and keeps the
-# data on a 1 GB disk. You are asked for MCM_ACCESS_CODE (the office code
-# employees type once) when the Blueprint is created.
+# It builds the Dockerfile and gives the site an https address. You are asked
+# for MCM_ACCESS_CODE (the office code employees type once) on creation.
+#
+# FREE PLAN (proof of concept): no persistent disk, so the list, users and
+# projects reset whenever the service sleeps (15 min idle) or redeploys.
+# For real use switch to the paid plan and keep the data on a disk:
+#     plan: starter
+#     disk:
+#       name: data
+#       mountPath: /data
+#       sizeGB: 1
 services:
   - type: web
     name: mcmaster-orders
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /api/ping
     autoDeploy: true
-    disk:
-      name: data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: MCM_ACCESS_CODE
         sync: false
