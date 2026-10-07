@@ -1,0 +1,20 @@
+# Render Blueprint: Render -> New -> Blueprint -> pick this repository.
+# It builds the Dockerfile, gives the site an https address, and keeps the
+# data on a 1 GB disk. You are asked for MCM_ACCESS_CODE (the office code
+# employees type once) when the Blueprint is created.
+services:
+  - type: web
+    name: mcmaster-orders
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/ping
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: MCM_ACCESS_CODE
+        sync: false
+      - key: TZ
+        value: Asia/Jerusalem

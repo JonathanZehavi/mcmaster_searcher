@@ -23,7 +23,7 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) {
+  if (res.status === 401 && path !== "/api/identify") {
     showAuth();
     throw new Error("unauthorized");
   }
@@ -42,7 +42,8 @@ function tierLabel(t) {
 }
 
 // ---------- who is this (once per browser) ----------
-function showAuth(names = []) {
+function showAuth(names = [], needsCode = false) {
+  $("#code-box").classList.toggle("hidden", !needsCode);
   $("#app").classList.add("hidden");
   $("#auth").classList.remove("hidden");
   $("#known-names").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
@@ -69,13 +70,13 @@ function showApp(data) {
 
 async function boot() {
   const data = await api("/api/me");
-  if (!data.user) return showAuth(data.names);
+  if (!data.user) return showAuth(data.names, data.needs_code);
   showApp(data);
 }
 
 $("#who-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const data = await api("/api/identify", { method: "POST", body: { name: $("#who-input").value } });
+  const data = await api("/api/identify", { method: "POST", body: { name: $("#who-input").value, code: $("#code-input").value } });
   if (!data.ok) return ($("#who-err").textContent = data.error);
   $("#who-err").textContent = "";
   boot();

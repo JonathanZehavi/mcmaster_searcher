@@ -107,7 +107,9 @@ func alreadyRunning(port int) bool {
 }
 
 func main() {
-	startPort, _ := strconv.Atoi(envOr("MCM_PORT", "8642"))
+	// PORT is set by cloud hosts (Render, Railway, Fly): use exactly that port.
+	cloudPort := os.Getenv("PORT")
+	startPort, _ := strconv.Atoi(envOr("PORT", envOr("MCM_PORT", "8642")))
 	host := envOr("MCM_HOST", "0.0.0.0")
 	noOpen := os.Getenv("MCM_NO_OPEN") == "1"
 
@@ -115,7 +117,11 @@ func main() {
 	// just open it) or another program, e.g. macOS AirPlay on 5000 (then move on).
 	var ln net.Listener
 	port := startPort
-	for ; port < startPort+20; port++ {
+	maxPort := startPort + 20
+	if cloudPort != "" {
+		maxPort = startPort + 1
+	}
+	for ; port < maxPort; port++ {
 		var err error
 		if ln, err = net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port))); err == nil {
 			break
@@ -129,7 +135,7 @@ func main() {
 		}
 	}
 	if ln == nil {
-		fail(fmt.Sprintf("no free port between %d and %d", startPort, startPort+19))
+		fail(fmt.Sprintf("no free port between %d and %d", startPort, maxPort-1))
 	}
 	localURL := fmt.Sprintf("http://localhost:%d", port)
 

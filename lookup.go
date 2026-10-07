@@ -164,6 +164,7 @@ func (s *Scraper) allocatorOptions(profile string) []chromedp.ExecAllocatorOptio
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("lang", "en-US"),
+		chromedp.Flag("disable-dev-shm-usage", true), // containers have a tiny /dev/shm
 	)
 	if s.Headless {
 		opts = append(opts, chromedp.Flag("headless", "new"))

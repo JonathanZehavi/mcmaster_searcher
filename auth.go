@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -94,6 +96,9 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	out := J{"ok": true, "has_admin": s.store.HasAdmin(), "projects": s.store.Projects()}
 	if id := s.identify(r); id != nil {
 		out["user"], out["admin_mode"] = publicUser(id.user), id.admin
+	} else if accessCode() != "" {
+		// Behind an office code, strangers don't get the staff list.
+		out["user"], out["names"], out["needs_code"] = nil, []string{}, true
 	} else {
 		names := []string{}
 		for _, u := range s.store.Users() {
@@ -106,12 +111,23 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-// POST /api/identify {name}: "this browser is John_Doe".
+// accessCode is the office code (MCM_ACCESS_CODE). When the site is on the
+// internet it keeps strangers out: entered once per browser with the name.
+func accessCode() string { return strings.TrimSpace(os.Getenv("MCM_ACCESS_CODE")) }
+
+// POST /api/identify {name, code}: "this browser is John_Doe".
 func (s *Server) identifyAs(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name string `json:"name"`
+		Code string `json:"code"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
+	if want := accessCode(); want != "" &&
+		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(in.Code)), []byte(want)) != 1 {
+		time.Sleep(500 * time.Millisecond) // slow down guessing
+		writeJSON(w, 401, J{"ok": false, "error": "קוד המשרד שגוי."})
+		return
+	}
 	name := normalizeName(in.Name)
 	if !nameRe.MatchString(name) || len([]rune(name)) > 60 {
 		writeJSON(w, 400, J{"ok": false, "error": "כתוב שם בפורמט John_Doe."})
@@ -134,6 +150,7 @@ func (s *Server) identifyAs(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds()),
+		Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 	})
 	writeJSON(w, 200, J{"ok": true, "user": publicUser(&u)})
 }

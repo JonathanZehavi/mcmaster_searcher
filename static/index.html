@@ -15,6 +15,10 @@
       <input id="who-input" dir="ltr" list="known-names" placeholder="John_Doe" autocomplete="off" required>
       <datalist id="known-names"></datalist>
       <p class="muted small">שם המשתמש שלך בפורמט John_Doe. השם יירשם אוטומטית בכל הזמנה שלך.</p>
+      <div id="code-box" class="hidden">
+        <label for="code-input">קוד משרד</label>
+        <input id="code-input" type="password" dir="ltr" autocomplete="off">
+      </div>
       <button class="primary wide" type="submit">המשך</button>
       <p class="status error" id="who-err"></p>
     </form>

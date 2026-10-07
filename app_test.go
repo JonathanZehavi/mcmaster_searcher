@@ -486,3 +486,23 @@ func contains(xs []string, s string) bool {
 	}
 	return false
 }
+
+func TestOfficeAccessCode(t *testing.T) {
+	t.Setenv("MCM_ACCESS_CODE", "office-"+testPW("code"))
+	url, _, _, _ := func() (string, *client, *client, *client) {
+		store, _ := OpenStore(filepath.Join(t.TempDir(), "orders.json"))
+		srv := httptest.NewServer(NewServer(store, &stubScraper{}, t.TempDir(), Extractor{}))
+		t.Cleanup(srv.Close)
+		return srv.URL, nil, nil, nil
+	}()
+	c := newClient(t, url)
+	me := c.mustOK("GET", "/api/me", nil)
+	if me["needs_code"] != true || len(me["names"].([]any)) != 0 {
+		t.Fatalf("code-protected /api/me leaks or misses the flag: %v", me)
+	}
+	if code, _ := c.do("POST", "/api/identify", map[string]any{"name": "John_Doe", "code": "wrong"}); code != 401 {
+		t.Fatal("wrong office code accepted")
+	}
+	c.mustOK("POST", "/api/identify", map[string]any{"name": "John_Doe", "code": "office-" + testPW("code")})
+	c.mustOK("GET", "/api/items", nil)
+}

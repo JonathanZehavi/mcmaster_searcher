@@ -54,3 +54,33 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Latest ($VERSION)" \
             --notes "Built automatically from ${GITHUB_SHA::7}. Windows: McMasterList.exe. Mac: McMasterList-mac.zip (any Mac). extractor.js: drop into the McMasterList-data folder to update detection without a new download."
+
+  # Builds the hosting image (Dockerfile / render.yaml) and does a real lookup
+  # inside it, so a broken image never reaches Render.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build image
+        run: docker build -t mcmaster-orders .
+
+      - name: Smoke test (Chromium lookup inside the container)
+        run: |
+          go run ./tools/fakesite -addr 127.0.0.1:8765 &
+          docker run -d --name app --network host \
+            -e MCM_BASE_URL=http://127.0.0.1:8765 -e MCM_MIN_INTERVAL=0 -e MCM_NO_WARMUP=1 \
+            mcmaster-orders
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8642/api/ping && break; sleep 1; done
+          curl -fs -c jar -H 'Content-Type: application/json' -d '{"name":"CI_Bot"}' http://127.0.0.1:8642/api/identify
+          out=$(curl -fs -b jar 'http://127.0.0.1:8642/api/lookup?pn=8336N108')
+          echo "$out"
+          echo "$out" | grep -q '"name":"Shoulder Bolt Pair"'
+          echo "$out" | grep -q '"price":25.93'
+      - name: Container logs
+        if: always()
+        run: docker logs app || true
