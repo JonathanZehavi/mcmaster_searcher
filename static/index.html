@@ -7,29 +7,16 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <!-- ===== login / first setup ===== -->
+  <!-- ===== who are you (once per browser) ===== -->
   <div id="auth" class="auth hidden">
-    <form id="login-form" class="card auth-card">
+    <form id="who-form" class="card auth-card">
       <h1>הזמנות McMaster</h1>
-      <label for="l-user">שם משתמש</label>
-      <input id="l-user" autocomplete="username" dir="ltr" required>
-      <label for="l-pass">סיסמה</label>
-      <input id="l-pass" type="password" autocomplete="current-password" dir="ltr" required>
-      <button class="primary wide" type="submit">כניסה</button>
-      <p class="status error" id="l-err"></p>
-      <p class="muted small">אין לך משתמש? מנהל המערכת יוצר אותו בלשונית "ניהול".</p>
-    </form>
-    <form id="setup-form" class="card auth-card hidden">
-      <h1>הגדרה ראשונה</h1>
-      <p class="muted">צור את משתמש המנהל. בעזרתו תוסיף את שאר המשתמשים והפרויקטים.</p>
-      <label for="s-name">שם מלא (כפי שיופיע בעמודת המזמין)</label>
-      <input id="s-name" required>
-      <label for="s-user">שם משתמש</label>
-      <input id="s-user" dir="ltr" autocomplete="username" required>
-      <label for="s-pass">סיסמה</label>
-      <input id="s-pass" type="password" dir="ltr" autocomplete="new-password" required>
-      <button class="primary wide" type="submit">צור מנהל והתחל</button>
-      <p class="status error" id="s-err"></p>
+      <label for="who-input">מי אתה? (פעם אחת בלבד במחשב הזה)</label>
+      <input id="who-input" dir="ltr" list="known-names" placeholder="John_Doe" autocomplete="off" required>
+      <datalist id="known-names"></datalist>
+      <p class="muted small">שם המשתמש שלך בפורמט John_Doe. השם יירשם אוטומטית בכל הזמנה שלך.</p>
+      <button class="primary wide" type="submit">המשך</button>
+      <p class="status error" id="who-err"></p>
     </form>
   </div>
 
@@ -46,9 +33,10 @@
         <button class="tab" data-tab="help">כפתור מהיר</button>
       </nav>
       <div class="who">
-        <span id="who-name"></span>
-        <button class="link light" id="pw-btn">שינוי סיסמה</button>
-        <button class="link light" id="logout-btn">יציאה</button>
+        <span id="who-name" dir="ltr"></span>
+        <button class="link light" id="notme-btn" title="המחשב ישכח את השם">לא אני</button>
+        <button class="link light" id="admin-btn"></button>
+        <button class="link light admin-only" id="pw-btn">שינוי סיסמה</button>
       </div>
     </header>
 
@@ -98,7 +86,11 @@
               </div>
               <div id="f-tiers" class="tiers hidden"></div>
 
-              <div class="grid two">
+              <div class="grid three">
+                <div>
+                  <label for="f-requester">מזמין</label>
+                  <input id="f-requester" dir="ltr" readonly tabindex="-1">
+                </div>
                 <div>
                   <label for="f-project">פרויקט</label>
                   <select id="f-project" required></select>
@@ -108,7 +100,7 @@
                   <input id="f-purpose" placeholder="למה צריך את זה">
                 </div>
               </div>
-              <p class="muted small">מזמין: <b id="f-requester"></b> · תאריך: <span id="f-date"></span></p>
+              <p class="muted small">תאריך: <span id="f-date"></span></p>
               <div class="actions">
                 <button type="submit" class="primary">הוסף לרשימה</button>
                 <button type="button" id="cancel-btn" class="link">ביטול</button>
@@ -169,13 +161,7 @@
         <div class="card">
           <h2>משתמשים</h2>
           <div class="table-wrap"><table id="users-table"></table></div>
-          <form id="user-form" class="grid five inline-form">
-            <input id="u-name" placeholder="שם מלא" required>
-            <input id="u-user" placeholder="שם משתמש" dir="ltr" required>
-            <input id="u-pass" placeholder="סיסמה זמנית" dir="ltr" required>
-            <select id="u-role"><option value="user">משתמש</option><option value="admin">מנהל / רכש</option></select>
-            <button class="primary" type="submit">הוסף משתמש</button>
-          </form>
+          <p class="muted small">משתמשים נוספים לבד בפעם הראשונה שהם בוחרים את שמם. כאן קובעים מי מנהל (עם סיסמת מנהל) ומשביתים משתמשים.</p>
         </div>
         <div class="card">
           <h2>פרויקטים</h2>
@@ -214,6 +200,18 @@
       <input id="po-date" type="date">
       <div class="actions">
         <button class="primary" value="ok">סגור הזמנה והעבר להיסטוריה</button>
+        <button class="link" value="cancel" formnovalidate>ביטול</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="admin-dialog">
+    <form method="dialog" id="admin-form">
+      <h2 id="admin-title">כניסת מנהל</h2>
+      <p class="muted small" id="admin-text"></p>
+      <label for="admin-pass">סיסמת מנהל</label>
+      <input id="admin-pass" type="password" dir="ltr" autocomplete="current-password">
+      <div class="actions">
+        <button class="primary" value="ok">כניסה</button>
         <button class="link" value="cancel" formnovalidate>ביטול</button>
       </div>
     </form>

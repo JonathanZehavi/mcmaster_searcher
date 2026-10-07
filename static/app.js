@@ -23,7 +23,7 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401 && !path.startsWith("/api/login")) {
+  if (res.status === 401) {
     showAuth();
     throw new Error("unauthorized");
   }
@@ -41,22 +41,27 @@ function tierLabel(t) {
   return t.max === 0 ? `${t.min}+` : t.min === t.max ? `${t.min}` : `${t.min}–${t.max}`;
 }
 
-// ---------- auth ----------
-function showAuth(needsSetup = false) {
+// ---------- who is this (once per browser) ----------
+function showAuth(names = []) {
   $("#app").classList.add("hidden");
   $("#auth").classList.remove("hidden");
-  $("#login-form").classList.toggle("hidden", needsSetup);
-  $("#setup-form").classList.toggle("hidden", !needsSetup);
-  (needsSetup ? $("#s-name") : $("#l-user")).focus();
+  $("#known-names").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
+  $("#who-input").focus();
 }
 
-function showApp(me, projects) {
-  state.me = me;
-  state.projects = projects || [];
+function showApp(data) {
+  state.me = data.user;
+  state.adminMode = !!data.admin_mode;
+  state.hasAdmin = !!data.has_admin;
+  state.projects = data.projects || [];
   $("#auth").classList.add("hidden");
   $("#app").classList.remove("hidden");
-  $("#who-name").textContent = me.name + (me.role === "admin" ? " (מנהל)" : "");
-  document.body.classList.toggle("is-admin", me.role === "admin");
+  $("#who-name").textContent = state.me.name;
+  document.body.classList.toggle("admin-mode", state.adminMode);
+  $("#admin-btn").textContent = state.adminMode ? "יציאה ממצב מנהל" : state.hasAdmin ? "כניסת מנהל" : "הגדרת מנהל";
+  // A manager tab that is no longer allowed falls back to the order tab.
+  const active = document.querySelector(".tab.active");
+  if (!state.adminMode && active && active.classList.contains("admin-only")) document.querySelector('.tab[data-tab="order"]').click();
   fillProjects();
   loadMine();
   prefillFromBookmarklet();
@@ -64,33 +69,42 @@ function showApp(me, projects) {
 
 async function boot() {
   const data = await api("/api/me");
-  if (data.needs_setup) return showAuth(true);
-  if (!data.user) return showAuth(false);
-  showApp(data.user, data.projects);
+  if (!data.user) return showAuth(data.names);
+  showApp(data);
 }
 
-$("#login-form").addEventListener("submit", async (e) => {
+$("#who-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const data = await api("/api/login", { method: "POST", body: { username: $("#l-user").value, password: $("#l-pass").value } });
-  if (!data.ok) return ($("#l-err").textContent = data.error);
-  $("#l-err").textContent = "";
-  $("#l-pass").value = "";
+  const data = await api("/api/identify", { method: "POST", body: { name: $("#who-input").value } });
+  if (!data.ok) return ($("#who-err").textContent = data.error);
+  $("#who-err").textContent = "";
   boot();
 });
 
-$("#setup-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const data = await api("/api/setup", {
-    method: "POST",
-    body: { name: $("#s-name").value, username: $("#s-user").value, password: $("#s-pass").value },
-  });
-  if (!data.ok) return ($("#s-err").textContent = data.error);
-  boot();
-});
-
-$("#logout-btn").addEventListener("click", async () => {
-  await api("/api/logout", { method: "POST" });
+$("#notme-btn").addEventListener("click", async () => {
+  if (!confirm(`המחשב ישכח שאתה ${state.me.name}. להמשיך?`)) return;
+  await api("/api/forget", { method: "POST" });
   location.href = "/";
+});
+
+$("#admin-btn").addEventListener("click", async () => {
+  if (state.adminMode) {
+    await api("/api/admin/leave", { method: "POST" });
+    return boot();
+  }
+  $("#admin-title").textContent = state.hasAdmin ? "כניסת מנהל" : "הגדרת מנהל ראשון";
+  $("#admin-text").textContent = state.hasAdmin
+    ? "צריך להיכנס פעם אחת בכל מחשב. המחשב יזכור."
+    : `עדיין אין מנהל. בחר סיסמה, ו-${state.me.name} יהיה המנהל: יראה את הרשימה של כולם, את ההיסטוריה ואת הניהול.`;
+  $("#admin-pass").value = "";
+  $("#admin-dialog").showModal();
+});
+$("#admin-dialog").addEventListener("close", async () => {
+  if ($("#admin-dialog").returnValue !== "ok") return;
+  const data = await api("/api/admin/enter", { method: "POST", body: { password: $("#admin-pass").value } });
+  if (!data.ok) return toast(data.error, true);
+  toast("מצב מנהל פעיל.");
+  boot();
 });
 
 $("#pw-btn").addEventListener("click", () => {
@@ -234,7 +248,7 @@ function showItemForm(part) {
     img.style.display = "none";
     $("#f-noimg").style.display = "";
   }
-  $("#f-requester").textContent = state.me.name;
+  $("#f-requester").value = state.me.name;
   $("#f-date").textContent = day(new Date().toISOString());
   $("#f-purpose").value = "";
   updatePricing();
@@ -419,15 +433,16 @@ $("#orders-table").addEventListener("click", async (e) => {
 // ---------- admin: users & projects ----------
 async function loadAdmin() {
   const { users } = await api("/api/users");
+  state.users = users;
   $("#users-table").innerHTML =
-    `<thead><tr><th>שם</th><th>שם משתמש</th><th>תפקיד</th><th>סטטוס</th><th></th></tr></thead><tbody>` +
+    `<thead><tr><th>שם</th><th>תפקיד</th><th>סטטוס</th><th></th></tr></thead><tbody>` +
     users
       .map(
         (u) => `<tr data-user="${u.id}" class="${u.active ? "" : "inactive"}">
-        <td>${esc(u.name)}</td><td dir="ltr">${esc(u.username)}</td>
+        <td dir="ltr">${esc(u.name)}</td>
         <td><select class="role"><option value="user"${u.role === "user" ? " selected" : ""}>משתמש</option><option value="admin"${u.role === "admin" ? " selected" : ""}>מנהל / רכש</option></select></td>
         <td>${u.active ? "פעיל" : "מושבת"}</td>
-        <td><button class="link reset">איפוס סיסמה</button> <button class="link toggle">${u.active ? "השבת" : "הפעל"}</button></td></tr>`
+        <td>${u.role === "admin" ? `<button class="link reset">קבע סיסמת מנהל</button>` : ""} <button class="link toggle">${u.active ? "השבת" : "הפעל"}</button></td></tr>`
       )
       .join("") +
     `</tbody>`;
@@ -441,27 +456,24 @@ async function patchUser(id, body) {
 }
 
 $("#users-table").addEventListener("change", (e) => {
-  if (e.target.classList.contains("role")) patchUser(e.target.closest("tr").dataset.user, { role: e.target.value });
+  if (!e.target.classList.contains("role")) return;
+  const id = e.target.closest("tr").dataset.user;
+  const u = state.users.find((x) => String(x.id) === id);
+  const body = { role: e.target.value };
+  if (e.target.value === "admin" && !u.has_password) {
+    const pw = prompt(`סיסמת מנהל ל-${u.name} (לפחות 4 תווים):`);
+    if (!pw) return loadAdmin();
+    body.password = pw;
+  }
+  patchUser(id, body);
 });
 $("#users-table").addEventListener("click", (e) => {
   const tr = e.target.closest("tr");
   if (e.target.classList.contains("toggle")) patchUser(tr.dataset.user, { active: tr.classList.contains("inactive") });
   if (e.target.classList.contains("reset")) {
-    const pw = prompt("סיסמה זמנית חדשה (לפחות 4 תווים):");
+    const pw = prompt("סיסמת מנהל חדשה (לפחות 4 תווים):");
     if (pw) patchUser(tr.dataset.user, { password: pw });
   }
-});
-
-$("#user-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const data = await api("/api/users", {
-    method: "POST",
-    body: { name: $("#u-name").value, username: $("#u-user").value, password: $("#u-pass").value, role: $("#u-role").value },
-  });
-  if (!data.ok) return toast(data.error, true);
-  toast(`נוסף משתמש: ${data.user.name}. מסור לו את שם המשתמש והסיסמה.`);
-  e.target.reset();
-  loadAdmin();
 });
 
 function renderProjects() {

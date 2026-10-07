@@ -99,9 +99,12 @@ type User struct {
 
 func (u *User) IsAdmin() bool { return u.Role == "admin" }
 
+// session is one browser. Admin means the manager password was entered in
+// this browser; it only counts while the user still has the admin role.
 type session struct {
 	UserID  int       `json:"user_id"`
 	Expires time.Time `json:"expires"`
+	Admin   bool      `json:"admin"`
 }
 
 type storeData struct {
@@ -240,15 +243,15 @@ type ItemUpdate struct {
 	Purpose  *string
 }
 
-// UpdateItem edits an open item. Non-admins may only edit their own.
-func (s *Store) UpdateItem(id int, u *User, up ItemUpdate) (Item, error) {
+// UpdateItem edits an open item. Without manager mode only your own.
+func (s *Store) UpdateItem(id int, u *User, manager bool, up ItemUpdate) (Item, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	it := s.findOpen(id)
 	if it == nil {
 		return Item{}, ErrNotFound
 	}
-	if !u.IsAdmin() && it.UserID != u.ID {
+	if !manager && it.UserID != u.ID {
 		return Item{}, ErrForbidden
 	}
 	if up.Quantity != nil {
@@ -264,12 +267,12 @@ func (s *Store) UpdateItem(id int, u *User, up ItemUpdate) (Item, error) {
 	return *it, s.save()
 }
 
-func (s *Store) DeleteItem(id int, u *User) error {
+func (s *Store) DeleteItem(id int, u *User, manager bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, it := range s.d.Items {
 		if it.ID == id && it.Status == "open" {
-			if !u.IsAdmin() && it.UserID != u.ID {
+			if !manager && it.UserID != u.ID {
 				return ErrForbidden
 			}
 			s.d.Items = append(s.d.Items[:i], s.d.Items[i+1:]...)
@@ -479,21 +482,80 @@ func (s *Store) NewSession(userID int, ttl time.Duration) (string, error) {
 	return tok, s.save()
 }
 
-// SessionUser returns the active user behind a session token, or nil.
-func (s *Store) SessionUser(tok string) *User {
+// SessionUser returns the active user behind a session token (or nil), and
+// whether this browser is in manager mode.
+func (s *Store) SessionUser(tok string) (*User, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ses, ok := s.d.Sessions[tok]
 	if !ok || time.Now().After(ses.Expires) {
-		return nil
+		return nil, false
 	}
 	for _, u := range s.d.Users {
 		if u.ID == ses.UserID && u.Active {
 			cp := *u
-			return &cp
+			return &cp, ses.Admin && u.IsAdmin()
 		}
 	}
-	return nil
+	return nil, false
+}
+
+// SetSessionAdmin turns manager mode on or off for one browser.
+func (s *Store) SetSessionAdmin(tok string, on bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ses, ok := s.d.Sessions[tok]
+	if !ok {
+		return ErrNotFound
+	}
+	ses.Admin = on
+	return s.save()
+}
+
+// FindOrCreateUser returns the user with this name (any letter case),
+// creating a regular user the first time a name is used.
+func (s *Store) FindOrCreateUser(name string) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.d.Users {
+		if strings.EqualFold(u.Username, name) {
+			return *u, nil
+		}
+	}
+	u := &User{ID: s.d.NextUserID, Username: name, Name: name, Role: "user", Active: true, CreatedAt: now()}
+	s.d.NextUserID++
+	s.d.Users = append(s.d.Users, u)
+	return *u, s.save()
+}
+
+// HasAdmin reports whether any active manager with a password exists.
+func (s *Store) HasAdmin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.d.Users {
+		if u.Active && u.IsAdmin() && u.PassHash != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// MakeFirstAdmin promotes a user to manager, but only while there is none.
+func (s *Store) MakeFirstAdmin(userID int, passHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.d.Users {
+		if u.Active && u.IsAdmin() && u.PassHash != "" {
+			return ErrTaken
+		}
+	}
+	for _, u := range s.d.Users {
+		if u.ID == userID {
+			u.Role, u.PassHash = "admin", passHash
+			return s.save()
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *Store) DeleteSession(tok string) {

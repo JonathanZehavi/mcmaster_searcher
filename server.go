@@ -52,10 +52,11 @@ func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) 
 	})
 
 	s.mux.HandleFunc("GET /api/me", s.me)
-	s.mux.HandleFunc("POST /api/setup", s.setup)
-	s.mux.HandleFunc("POST /api/login", s.login)
-	s.mux.HandleFunc("POST /api/logout", s.logout)
-	s.mux.HandleFunc("POST /api/me/password", user(s.changePassword))
+	s.mux.HandleFunc("POST /api/identify", s.identifyAs)
+	s.mux.HandleFunc("POST /api/forget", s.forget)
+	s.mux.HandleFunc("POST /api/admin/enter", user(s.adminEnter))
+	s.mux.HandleFunc("POST /api/admin/leave", user(s.adminLeave))
+	s.mux.HandleFunc("POST /api/me/password", admin(s.changePassword))
 
 	s.mux.HandleFunc("GET /api/lookup", user(s.lookup))
 	s.mux.HandleFunc("GET /api/items", user(s.listItems))
@@ -70,7 +71,6 @@ func NewServer(store *Store, scraper Lookuper, imagesDir string, ext Extractor) 
 	s.mux.HandleFunc("GET /api/orders/{id}", admin(s.getOrder))
 	s.mux.HandleFunc("GET /api/export.xlsx", admin(s.export))
 	s.mux.HandleFunc("GET /api/users", admin(s.listUsers))
-	s.mux.HandleFunc("POST /api/users", admin(s.addUser))
 	s.mux.HandleFunc("PATCH /api/users/{id}", admin(s.updateUser))
 	s.mux.HandleFunc("PUT /api/projects", admin(s.setProjects))
 	return s
@@ -170,7 +170,7 @@ func (f *flexFloat) UnmarshalJSON(b []byte) error {
 func (s *Server) listItems(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	uid := u.ID
-	if u.IsAdmin() && r.URL.Query().Get("scope") == "all" {
+	if currentIdentity(r).admin && r.URL.Query().Get("scope") == "all" {
 		uid = 0
 	}
 	writeJSON(w, 200, J{"items": s.store.OpenItems(uid)})
@@ -288,7 +288,7 @@ func (s *Server) updateItem(w http.ResponseWriter, r *http.Request) {
 		}
 		up.Quantity = &in.Quantity.V
 	}
-	it, err := s.store.UpdateItem(id, currentUser(r), up)
+	it, err := s.store.UpdateItem(id, currentUser(r), currentIdentity(r).admin, up)
 	if !writeStoreErr(w, err) {
 		writeJSON(w, 200, J{"ok": true, "item": it})
 	}
@@ -296,7 +296,7 @@ func (s *Server) updateItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteItem(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(r.PathValue("id"))
-	if !writeStoreErr(w, s.store.DeleteItem(id, currentUser(r))) {
+	if !writeStoreErr(w, s.store.DeleteItem(id, currentUser(r), currentIdentity(r).admin)) {
 		writeJSON(w, 200, J{"ok": true})
 	}
 }

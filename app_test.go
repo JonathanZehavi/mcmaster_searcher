@@ -207,7 +207,8 @@ func items(out map[string]any) []map[string]any {
 	return res
 }
 
-// world: a server with an admin (logged in as `admin`), two users, one project.
+// world: a server where Rachel_Levi is the manager (in manager mode) and
+// Dana_Cohen and Yossi_Mizrahi are regular users; two projects.
 func world(t *testing.T, sc Lookuper) (srvURL string, admin, dana, yossi *client) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "orders.json"))
 	if err != nil {
@@ -216,66 +217,97 @@ func world(t *testing.T, sc Lookuper) (srvURL string, admin, dana, yossi *client
 	srv := httptest.NewServer(NewServer(store, sc, t.TempDir(), Extractor{}))
 	t.Cleanup(srv.Close)
 	admin = newClient(t, srv.URL)
-	admin.mustOK("POST", "/api/setup", map[string]any{"name": "Rachel Purchasing", "username": "rachel", "password": testPW("rachel")})
+	admin.mustOK("POST", "/api/identify", map[string]any{"name": "Rachel_Levi"})
+	admin.mustOK("POST", "/api/admin/enter", map[string]any{"password": testPW("rachel")}) // first manager
 	admin.mustOK("PUT", "/api/projects", map[string]any{"projects": []string{"CWC", "Lab (Hanoch)"}})
-	for _, u := range []string{"dana", "yossi"} {
-		admin.mustOK("POST", "/api/users", map[string]any{"name": strings.ToUpper(u[:1]) + u[1:], "username": u, "password": testPW(u)})
-	}
 	dana, yossi = newClient(t, srv.URL), newClient(t, srv.URL)
-	dana.mustOK("POST", "/api/login", map[string]any{"username": "dana", "password": testPW("dana")})
-	yossi.mustOK("POST", "/api/login", map[string]any{"username": "YOSSI", "password": testPW("yossi")})
+	dana.mustOK("POST", "/api/identify", map[string]any{"name": " dana cohen "}) // normalized to Dana_Cohen
+	yossi.mustOK("POST", "/api/identify", map[string]any{"name": "Yossi_Mizrahi"})
 	return srv.URL, admin, dana, yossi
 }
 
-func TestAuth(t *testing.T) {
+func TestNormalizeName(t *testing.T) {
+	for in, want := range map[string]string{"John_Doe": "John_Doe", " john doe ": "John_Doe", "JOHN__DOE": "JOHN_DOE", "dana": "Dana"} {
+		if got := normalizeName(in); got != want {
+			t.Errorf("normalizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIdentityAndManagerMode(t *testing.T) {
 	url, admin, dana, _ := world(t, &stubScraper{})
 	anon := newClient(t, url)
-	if code, out := anon.do("GET", "/api/me", nil); code != 200 || out["user"] != nil || out["needs_setup"] == true {
-		t.Fatalf("anonymous /api/me: %d %v", code, out)
+	me := anon.mustOK("GET", "/api/me", nil)
+	if me["user"] != nil || me["has_admin"] != true || len(me["names"].([]any)) != 3 {
+		t.Fatalf("anonymous /api/me: %v", me)
 	}
 	if code, _ := anon.do("GET", "/api/items", nil); code != 401 {
-		t.Fatal("items must need login")
+		t.Fatal("items must need a name")
 	}
-	if code, _ := anon.do("POST", "/api/setup", map[string]any{"name": "x", "username": "x", "password": testPW("x")}); code != 409 {
-		t.Fatal("setup must only work once")
-	}
-	if code, _ := anon.do("POST", "/api/login", map[string]any{"username": "dana", "password": testPW("wrong")}); code != 401 {
-		t.Fatal("wrong password accepted")
-	}
-	if code, _ := dana.do("GET", "/api/users", nil); code != 403 {
-		t.Fatal("non-admin reached user admin")
-	}
-	for _, p := range []string{"/api/orders", "/api/items?scope=all"} {
-		code, out := dana.do("GET", p, nil)
-		if p == "/api/orders" && code != 403 {
-			t.Fatalf("non-admin reached %s", p)
-		}
-		_ = out
+	if code, _ := anon.do("POST", "/api/identify", map[string]any{"name": "<script>"}); code != 400 {
+		t.Fatal("bad name accepted")
 	}
 
-	// disabling a user ends their session
+	// the same name in another browser is the same user, and stays remembered
+	again := newClient(t, url)
+	u := again.mustOK("POST", "/api/identify", map[string]any{"name": "DANA_COHEN"})["user"].(map[string]any)
+	if u["name"] != "Dana_Cohen" {
+		t.Fatalf("name lookup should ignore case: %v", u)
+	}
+	if again.mustOK("GET", "/api/me", nil)["user"].(map[string]any)["name"] != "Dana_Cohen" {
+		t.Fatal("browser forgot who it is")
+	}
+
+	// regular users get no manager screens, and cannot become manager
+	for _, p := range []string{"/api/orders", "/api/users"} {
+		if code, _ := dana.do("GET", p, nil); code != 403 {
+			t.Fatalf("non-manager reached %s", p)
+		}
+	}
+	if code, _ := dana.do("POST", "/api/admin/enter", map[string]any{"password": testPW("rachel")}); code != 401 {
+		t.Fatal("non-manager entered manager mode with the manager's password")
+	}
+	// typing the manager's name is not enough without the password
+	fake := newClient(t, url)
+	fake.mustOK("POST", "/api/identify", map[string]any{"name": "Rachel_Levi"})
+	if code, _ := fake.do("GET", "/api/orders", nil); code != 403 {
+		t.Fatal("manager name without password reached history")
+	}
+	if code, _ := fake.do("POST", "/api/admin/enter", map[string]any{"password": "nope"}); code != 401 {
+		t.Fatal("wrong manager password accepted")
+	}
+	// leaving manager mode
+	admin.mustOK("POST", "/api/admin/leave", nil)
+	if code, _ := admin.do("GET", "/api/orders", nil); code != 403 {
+		t.Fatal("still in manager mode after leaving")
+	}
+	admin.mustOK("POST", "/api/admin/enter", map[string]any{"password": testPW("rachel")})
+
+	// promoting needs a password; disabling a user forgets their browsers
 	users := admin.mustOK("GET", "/api/users", nil)["users"].([]any)
-	var danaID float64
-	for _, u := range users {
-		if u.(map[string]any)["username"] == "dana" {
-			danaID = u.(map[string]any)["id"].(float64)
-		}
+	ids := map[string]int{}
+	for _, x := range users {
+		ids[x.(map[string]any)["name"].(string)] = int(x.(map[string]any)["id"].(float64))
 	}
-	admin.mustOK("PATCH", fmt.Sprintf("/api/users/%d", int(danaID)), map[string]any{"active": false})
+	if code, _ := admin.do("PATCH", fmt.Sprintf("/api/users/%d", ids["Yossi_Mizrahi"]), map[string]any{"role": "admin"}); code != 400 {
+		t.Fatal("manager without password created")
+	}
+	admin.mustOK("PATCH", fmt.Sprintf("/api/users/%d", ids["Dana_Cohen"]), map[string]any{"active": false})
 	if code, _ := dana.do("GET", "/api/items", nil); code != 401 {
-		t.Fatal("disabled user still logged in")
+		t.Fatal("disabled user still recognized")
 	}
-
-	// the only admin cannot demote or disable themselves
-	if code, _ := admin.do("PATCH", "/api/users/1", map[string]any{"role": "user"}); code != 400 {
-		t.Fatal("last admin was demoted")
+	if code, _ := newClient(t, url).do("POST", "/api/identify", map[string]any{"name": "Dana_Cohen"}); code != 403 {
+		t.Fatal("disabled user could pick their name again")
 	}
-	admin.mustOK("GET", "/api/users", nil) // still admin
+	if code, _ := admin.do("PATCH", fmt.Sprintf("/api/users/%d", ids["Rachel_Levi"]), map[string]any{"role": "user"}); code != 400 {
+		t.Fatal("last manager was demoted")
+	}
 
 	// password change
 	admin.mustOK("POST", "/api/me/password", map[string]any{"old": testPW("rachel"), "new": testPW("rachel2")})
-	fresh := newClient(t, url)
-	fresh.mustOK("POST", "/api/login", map[string]any{"username": "rachel", "password": testPW("rachel2")})
+	other := newClient(t, url)
+	other.mustOK("POST", "/api/identify", map[string]any{"name": "Rachel_Levi"})
+	other.mustOK("POST", "/api/admin/enter", map[string]any{"password": testPW("rachel2")})
 }
 
 func TestOrderFlow(t *testing.T) {
@@ -295,7 +327,7 @@ func TestOrderFlow(t *testing.T) {
 		"project": "CWC", "purpose": "fixture",
 		"tiers": []PriceTier{{1, 0, 1.00}}, // a tampered price from the browser is ignored for looked-up parts
 	})["item"].(map[string]any)
-	if added["unit_price"] != 25.93 || added["total"] != 311.16 || added["requester"] != "Dana" {
+	if added["unit_price"] != 25.93 || added["total"] != 311.16 || added["requester"] != "Dana_Cohen" {
 		t.Fatalf("pricing/requester wrong: %v", added)
 	}
 	danaItem := int(added["id"].(float64))

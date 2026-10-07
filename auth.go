@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -12,40 +13,73 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Identity without passwords: the first time a browser opens the site, the
+// person picks or types their name (John_Doe) once; a long-lived cookie
+// remembers it and every order line is stamped with it. Only manager screens
+// (purchasing, history, users) ask for a password, once per browser.
+
 const (
 	sessionCookie = "mcm_session"
-	sessionTTL    = 30 * 24 * time.Hour
+	sessionTTL    = 5 * 365 * 24 * time.Hour
 )
+
+var nameRe = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._'-]*$`)
+
+// normalizeName turns "john doe" / " John_Doe " into "John_Doe".
+func normalizeName(raw string) string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == '_' || r == '\t' })
+	for i, p := range parts {
+		r := []rune(p)
+		parts[i] = strings.ToUpper(string(r[0])) + string(r[1:])
+	}
+	return strings.Join(parts, "_")
+}
 
 type ctxKey struct{}
 
-func currentUser(r *http.Request) *User {
-	u, _ := r.Context().Value(ctxKey{}).(*User)
-	return u
+type identity struct {
+	user  *User
+	admin bool // manager mode is on in this browser
+	token string
 }
 
-// requireUser wraps handlers that need a logged-in user; admin-only ones also
-// check the role.
+func currentUser(r *http.Request) *User { return r.Context().Value(ctxKey{}).(*identity).user }
+func currentIdentity(r *http.Request) *identity {
+	id, _ := r.Context().Value(ctxKey{}).(*identity)
+	return id
+}
+
+func (s *Server) identify(r *http.Request) *identity {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return nil
+	}
+	u, admin := s.store.SessionUser(c.Value)
+	if u == nil {
+		return nil
+	}
+	return &identity{user: u, admin: admin, token: c.Value}
+}
+
+// requireUser wraps handlers that need a known person; admin ones also need
+// manager mode.
 func (s *Server) requireUser(admin bool, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var u *User
-		if c, err := r.Cookie(sessionCookie); err == nil {
-			u = s.store.SessionUser(c.Value)
-		}
-		if u == nil {
-			writeJSON(w, 401, J{"ok": false, "error": "צריך להתחבר מחדש."})
+		id := s.identify(r)
+		if id == nil {
+			writeJSON(w, 401, J{"ok": false, "error": "בחר את שמך כדי להמשיך."})
 			return
 		}
-		if admin && !u.IsAdmin() {
-			writeJSON(w, 403, J{"ok": false, "error": "רק מנהל יכול לעשות את זה."})
+		if admin && !id.admin {
+			writeJSON(w, 403, J{"ok": false, "error": "צריך כניסת מנהל."})
 			return
 		}
-		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, u)))
+		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
 	}
 }
 
 func publicUser(u *User) J {
-	return J{"id": u.ID, "username": u.Username, "name": u.Name, "role": u.Role, "active": u.Active}
+	return J{"id": u.ID, "name": u.Name, "role": u.Role, "active": u.Active, "has_password": u.PassHash != ""}
 }
 
 func hashPassword(pw string) (string, error) {
@@ -55,101 +89,93 @@ func hashPassword(pw string) (string, error) {
 
 func validPassword(pw string) bool { return len([]rune(pw)) >= 4 }
 
-func (s *Server) setSession(w http.ResponseWriter, userID int) error {
-	tok, err := s.store.NewSession(userID, sessionTTL)
+// GET /api/me: who this browser is, plus what the identify screen needs.
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	out := J{"ok": true, "has_admin": s.store.HasAdmin(), "projects": s.store.Projects()}
+	if id := s.identify(r); id != nil {
+		out["user"], out["admin_mode"] = publicUser(id.user), id.admin
+	} else {
+		names := []string{}
+		for _, u := range s.store.Users() {
+			if u.Active {
+				names = append(names, u.Name)
+			}
+		}
+		out["user"], out["names"] = nil, names
+	}
+	writeJSON(w, 200, out)
+}
+
+// POST /api/identify {name}: "this browser is John_Doe".
+func (s *Server) identifyAs(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	name := normalizeName(in.Name)
+	if !nameRe.MatchString(name) || len([]rune(name)) > 60 {
+		writeJSON(w, 400, J{"ok": false, "error": "כתוב שם בפורמט John_Doe."})
+		return
+	}
+	u, err := s.store.FindOrCreateUser(name)
 	if err != nil {
-		return err
+		writeJSON(w, 500, J{"ok": false, "error": err.Error()})
+		return
+	}
+	if !u.Active {
+		writeJSON(w, 403, J{"ok": false, "error": "המשתמש הזה הושבת. פנה למנהל."})
+		return
+	}
+	tok, err := s.store.NewSession(u.ID, sessionTTL)
+	if err != nil {
+		writeJSON(w, 500, J{"ok": false, "error": err.Error()})
+		return
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds()),
 	})
-	return nil
-}
-
-// GET /api/me: who is logged in, or whether first-time setup is needed.
-func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	if s.store.UserCount() == 0 {
-		writeJSON(w, 200, J{"ok": true, "needs_setup": true})
-		return
-	}
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		if u := s.store.SessionUser(c.Value); u != nil {
-			writeJSON(w, 200, J{"ok": true, "user": publicUser(u), "projects": s.store.Projects()})
-			return
-		}
-	}
-	writeJSON(w, 200, J{"ok": true, "user": nil})
-}
-
-type credentials struct {
-	Name     string `json:"name"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Role     string `json:"role"`
-}
-
-// POST /api/setup: creates the first admin. Only works while there are no users.
-func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
-	var in credentials
-	json.NewDecoder(r.Body).Decode(&in)
-	if s.store.UserCount() > 0 {
-		writeJSON(w, 409, J{"ok": false, "error": "כבר קיים משתמש מנהל."})
-		return
-	}
-	u, msg := s.createUser(in, "admin")
-	if msg != "" {
-		writeJSON(w, 400, J{"ok": false, "error": msg})
-		return
-	}
-	s.setSession(w, u.ID)
 	writeJSON(w, 200, J{"ok": true, "user": publicUser(&u)})
 }
 
-func (s *Server) createUser(in credentials, role string) (User, string) {
-	in.Username = strings.TrimSpace(in.Username)
-	in.Name = strings.TrimSpace(in.Name)
-	if in.Username == "" || in.Name == "" {
-		return User{}, "חסר שם או שם משתמש."
-	}
-	if !validPassword(in.Password) {
-		return User{}, "סיסמה צריכה להיות לפחות 4 תווים."
-	}
-	hash, err := hashPassword(in.Password)
-	if err != nil {
-		return User{}, err.Error()
-	}
-	u, err := s.store.AddUser(User{Username: in.Username, Name: in.Name, PassHash: hash, Role: role, Active: true})
-	if errors.Is(err, ErrTaken) {
-		return User{}, "שם המשתמש כבר תפוס."
-	}
-	if err != nil {
-		return User{}, err.Error()
-	}
-	return u, ""
-}
-
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	var in credentials
-	json.NewDecoder(r.Body).Decode(&in)
-	u := s.store.UserByName(strings.TrimSpace(in.Username))
-	if u == nil || !u.Active || bcrypt.CompareHashAndPassword([]byte(u.PassHash), []byte(in.Password)) != nil {
-		time.Sleep(500 * time.Millisecond) // slow down guessing
-		writeJSON(w, 401, J{"ok": false, "error": "שם משתמש או סיסמה שגויים."})
-		return
-	}
-	if err := s.setSession(w, u.ID); err != nil {
-		writeJSON(w, 500, J{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, 200, J{"ok": true, "user": publicUser(u)})
-}
-
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+// POST /api/forget: "not me" - this browser forgets who it is.
+func (s *Server) forget(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.store.DeleteSession(c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	writeJSON(w, 200, J{"ok": true})
+}
+
+// POST /api/admin/enter {password}: manager mode for this browser. While no
+// manager exists yet, the first password entered makes this user the manager.
+func (s *Server) adminEnter(w http.ResponseWriter, r *http.Request) {
+	id := currentIdentity(r)
+	var in struct {
+		Password string `json:"password"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	if !s.store.HasAdmin() {
+		if !validPassword(in.Password) {
+			writeJSON(w, 400, J{"ok": false, "error": "סיסמה צריכה להיות לפחות 4 תווים."})
+			return
+		}
+		hash, _ := hashPassword(in.Password)
+		if err := s.store.MakeFirstAdmin(id.user.ID, hash); err != nil {
+			writeJSON(w, 409, J{"ok": false, "error": "כבר הוגדר מנהל."})
+			return
+		}
+	} else if !id.user.IsAdmin() || bcrypt.CompareHashAndPassword([]byte(id.user.PassHash), []byte(in.Password)) != nil {
+		time.Sleep(500 * time.Millisecond) // slow down guessing
+		writeJSON(w, 401, J{"ok": false, "error": "סיסמת מנהל שגויה (או שהמשתמש הזה אינו מנהל)."})
+		return
+	}
+	s.store.SetSessionAdmin(id.token, true)
+	writeJSON(w, 200, J{"ok": true})
+}
+
+func (s *Server) adminLeave(w http.ResponseWriter, r *http.Request) {
+	s.store.SetSessionAdmin(currentIdentity(r).token, false)
 	writeJSON(w, 200, J{"ok": true})
 }
 
@@ -173,7 +199,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, J{"ok": true})
 }
 
-// ---------- admin: users ----------
+// ---------- manager: users ----------
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	out := []J{}
@@ -183,25 +209,11 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, J{"users": out})
 }
 
-func (s *Server) addUser(w http.ResponseWriter, r *http.Request) {
-	var in credentials
-	json.NewDecoder(r.Body).Decode(&in)
-	role := "user"
-	if in.Role == "admin" {
-		role = "admin"
-	}
-	u, msg := s.createUser(in, role)
-	if msg != "" {
-		writeJSON(w, 400, J{"ok": false, "error": msg})
-		return
-	}
-	writeJSON(w, 200, J{"ok": true, "user": publicUser(&u)})
-}
-
+// PATCH /api/users/{id}: role, active, manager password. Making someone a
+// manager needs a password for them (unless they already have one).
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(r.PathValue("id"))
 	var in struct {
-		Name     *string `json:"name"`
 		Role     *string `json:"role"`
 		Active   *bool   `json:"active"`
 		Password *string `json:"password"`
@@ -215,10 +227,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		hash, _ = hashPassword(*in.Password)
 	}
+	errNeedsPassword := errors.New("needs password")
+	var inner error
 	err := s.store.UpdateUser(id, func(u *User) {
-		if in.Name != nil && strings.TrimSpace(*in.Name) != "" {
-			u.Name = strings.TrimSpace(*in.Name)
-		}
 		if in.Role != nil && (*in.Role == "admin" || *in.Role == "user") {
 			u.Role = *in.Role
 		}
@@ -228,12 +239,17 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		if hash != "" {
 			u.PassHash = hash
 		}
+		if u.IsAdmin() && u.PassHash == "" {
+			u.Role, inner = "user", errNeedsPassword
+		}
 	})
 	switch {
 	case errors.Is(err, ErrLastAdmin):
 		writeJSON(w, 400, J{"ok": false, "error": "חייב להישאר לפחות מנהל פעיל אחד."})
 	case err != nil:
 		writeJSON(w, 404, J{"ok": false, "error": "משתמש לא נמצא."})
+	case inner != nil:
+		writeJSON(w, 400, J{"ok": false, "error": "כדי להפוך משתמש למנהל צריך לקבוע לו סיסמת מנהל."})
 	default:
 		writeJSON(w, 200, J{"ok": true})
 	}
