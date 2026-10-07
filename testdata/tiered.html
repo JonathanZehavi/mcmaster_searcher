@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>McMaster-Carr</title></head>
+<body><div id="app"></div>
+<script>
+// Simulates a product with quantity pricing, rendered client-side.
+setTimeout(() => {
+  document.getElementById('app').innerHTML = `
+   <div class="ProductDetail_root">
+     <h1>Shoulder Bolt Pair</h1>
+     <div>Thread Size 8-32</div>
+     <table>
+       <tr><td>1-11 pairs</td><td>$28.46</td></tr>
+       <tr><td>12 or more</td><td>$25.93</td></tr>
+     </table>
+     <div>Each piece ships individually bagged.</div>
+   </div>`;
+}, 300);
+</script></body></html>

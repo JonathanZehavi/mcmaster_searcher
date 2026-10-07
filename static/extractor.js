@@ -35,6 +35,7 @@
   const unitRe =
     /\$\s?([\d,]+\.\d{2})\s*(?:per\s+)?(each|pack of\s+[\d,]+|package of\s+[\d,]+|box of\s+[\d,]+|set of\s+[\d,]+|pair|ft\.?|foot|yd\.?|yard|lb\.?|pound|roll|kit)\b/i;
   let unit = "";
+  let unitLoose = false; // found somewhere on the page, not next to the price
   let price = "";
   const m = bodyText.match(unitRe);
   if (m) {
@@ -42,8 +43,41 @@
     unit = m[2];
   } else {
     const u = bodyText.match(/\b(pack of\s+[\d,]+|package of\s+[\d,]+|box of\s+[\d,]+)\b/i) || bodyText.match(/\b(each)\b/i);
-    if (u) unit = u[1];
+    if (u) {
+      unit = u[1];
+      unitLoose = true;
+    }
   }
+  // --- quantity price tiers ("1-11 pairs $28.46", "12 or more $25.93") ---
+  const found = [];
+  let tierUnit = "";
+  const num = (s) => +String(s).replace(/,/g, "");
+  const rangeRe = /\b(\d[\d,]*)\s*[-–]\s*(\d[\d,]*)\s*([A-Za-z]+\.?)?\s*\$\s?([\d,]+\.\d{2})/g;
+  const openRe = /\b(\d[\d,]*)\s*(?:or more|and (?:over|up)|[-–]\s*over|\+)\s*([A-Za-z]+\.?)?\s*\$\s?([\d,]+\.\d{2})/gi;
+  for (const t of bodyText.matchAll(rangeRe)) {
+    found.push({ min: num(t[1]), max: num(t[2]), price: num(t[4]) });
+    if (t[3] && !tierUnit) tierUnit = t[3];
+  }
+  for (const t of bodyText.matchAll(openRe)) {
+    found.push({ min: num(t[1]), max: 0, price: num(t[3]) });
+    if (t[2] && !tierUnit) tierUnit = t[2];
+  }
+  // Keep only a consistent ladder starting at 1 (1-11, 12-23, 24+); anything
+  // else is probably a thread size or dimension that happened to precede a price.
+  let tiers = [];
+  for (let next = 1; ; ) {
+    const t = found.find((x) => x.min === next && x.price > 0 && (x.max === 0 || x.max >= x.min));
+    if (!t) break;
+    tiers.push(t);
+    if (t.max === 0) break;
+    next = t.max + 1;
+  }
+  if (tiers.length) tiers[tiers.length - 1] = { ...tiers[tiers.length - 1], max: 0 }; // last tier has no ceiling
+  if (!tiers.length && price) tiers = [{ min: 1, max: 0, price: num(price) }];
+  if (!price && tiers.length) price = tiers[0].price.toFixed(2);
+  // A price ladder labels its own rows ("1-11 pairs"); trust that over loose text.
+  if (tierUnit && (!unit || unitLoose || tiers.length > 1)) unit = tierUnit.replace(/s\.?$/i, "").replace(/\.$/, "");
+
   unit = clean(unit).replace(/^(\w)/, (c) => c.toUpperCase());
 
   // --- image: og:image, else the largest product-looking image ---
@@ -73,5 +107,5 @@
     /access denied|unusual traffic|are you a robot|captcha|request blocked/i.test(bodyText) || bodyText.length < 40;
   const notFound = /no (?:products|results) (?:were )?found|not a valid part number|we couldn.t find/i.test(bodyText);
 
-  return { partNumber, names, unit, price, image, url: location.href, blocked, notFound, textLength: bodyText.length };
+  return { partNumber, names, unit, price, tiers, image, url: location.href, blocked, notFound, textLength: bodyText.length };
 }

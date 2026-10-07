@@ -3,117 +3,234 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>רשימת הזמנות McMaster</title>
+  <title>הזמנות McMaster</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header>
-    <h1>רשימת הזמנות McMaster</h1>
-    <nav>
-      <button class="tab active" data-tab="add">הוספה ורשימה</button>
-      <button class="tab" data-tab="history">הזמנות קודמות</button>
-      <button class="tab" data-tab="help">כפתור מהיר</button>
-    </nav>
-  </header>
+  <!-- ===== login / first setup ===== -->
+  <div id="auth" class="auth hidden">
+    <form id="login-form" class="card auth-card">
+      <h1>הזמנות McMaster</h1>
+      <label for="l-user">שם משתמש</label>
+      <input id="l-user" autocomplete="username" dir="ltr" required>
+      <label for="l-pass">סיסמה</label>
+      <input id="l-pass" type="password" autocomplete="current-password" dir="ltr" required>
+      <button class="primary wide" type="submit">כניסה</button>
+      <p class="status error" id="l-err"></p>
+      <p class="muted small">אין לך משתמש? מנהל המערכת יוצר אותו בלשונית "ניהול".</p>
+    </form>
+    <form id="setup-form" class="card auth-card hidden">
+      <h1>הגדרה ראשונה</h1>
+      <p class="muted">צור את משתמש המנהל. בעזרתו תוסיף את שאר המשתמשים והפרויקטים.</p>
+      <label for="s-name">שם מלא (כפי שיופיע בעמודת המזמין)</label>
+      <input id="s-name" required>
+      <label for="s-user">שם משתמש</label>
+      <input id="s-user" dir="ltr" autocomplete="username" required>
+      <label for="s-pass">סיסמה</label>
+      <input id="s-pass" type="password" dir="ltr" autocomplete="new-password" required>
+      <button class="primary wide" type="submit">צור מנהל והתחל</button>
+      <p class="status error" id="s-err"></p>
+    </form>
+  </div>
 
-  <main>
-    <section id="tab-add">
-      <form id="lookup-form" class="card">
-        <label for="pn">מק״ט</label>
-        <div class="row">
-          <input id="pn" dir="ltr" autocomplete="off" placeholder="91251A540" autofocus>
-          <button type="submit" id="lookup-btn">חפש</button>
-        </div>
-        <p id="lookup-status" class="status"></p>
-      </form>
+  <!-- ===== app ===== -->
+  <div id="app" class="hidden">
+    <header>
+      <h1>הזמנות McMaster</h1>
+      <nav id="tabs">
+        <button class="tab active" data-tab="order">הזמנה</button>
+        <button class="tab" data-tab="last">ההזמנה האחרונה שלי</button>
+        <button class="tab admin-only" data-tab="purchase">רכש – כל הרשימה</button>
+        <button class="tab admin-only" data-tab="history">היסטוריה</button>
+        <button class="tab admin-only" data-tab="admin">ניהול</button>
+        <button class="tab" data-tab="help">כפתור מהיר</button>
+      </nav>
+      <div class="who">
+        <span id="who-name"></span>
+        <button class="link light" id="pw-btn">שינוי סיסמה</button>
+        <button class="link light" id="logout-btn">יציאה</button>
+      </div>
+    </header>
 
-      <form id="item-form" class="card hidden">
-        <div class="product">
-          <div class="thumb"><img id="f-img" alt=""><span id="f-noimg">אין תמונה</span></div>
-          <div class="fields">
-            <div class="pn-line">
-              <span id="f-pn" dir="ltr"></span>
-              <a id="f-link" target="_blank" rel="noopener">פתח ב-McMaster ↗</a>
-              <button type="button" id="refresh-btn" class="link">רענן פרטים</button>
-            </div>
-            <label for="f-name">שם מוצר</label>
-            <input id="f-name" dir="ltr" list="name-options" required>
-            <datalist id="name-options"></datalist>
-            <div class="grid">
-              <div>
-                <label for="f-unit">יחידת מכירה</label>
-                <input id="f-unit" dir="ltr" list="unit-options" placeholder="Each / Pack of 100">
-                <datalist id="unit-options"><option value="Each"><option value="Pack of 10"><option value="Pack of 25"><option value="Pack of 50"><option value="Pack of 100"></datalist>
+    <main>
+      <!-- ----- order: lookup + my current lines ----- -->
+      <section id="tab-order">
+        <form id="lookup-form" class="card">
+          <label for="pn">מק״ט</label>
+          <div class="row">
+            <input id="pn" dir="ltr" autocomplete="off" placeholder="8336N108">
+            <button type="submit" id="lookup-btn" class="primary">חפש</button>
+          </div>
+          <p id="lookup-status" class="status"></p>
+        </form>
+
+        <form id="item-form" class="card hidden">
+          <div class="product">
+            <div class="thumb"><img id="f-img" alt=""><span id="f-noimg">אין תמונה</span></div>
+            <div class="fields">
+              <div class="pn-line">
+                <span id="f-pn" dir="ltr"></span>
+                <a id="f-link" target="_blank" rel="noopener">פתח ב-McMaster ↗</a>
+                <button type="button" id="refresh-btn" class="link">רענן פרטים</button>
               </div>
-              <div>
-                <label for="f-qty">כמות <small id="f-qty-hint"></small></label>
-                <input id="f-qty" type="number" min="1" value="1" required>
+              <label for="f-name">תיאור המוצר</label>
+              <input id="f-name" dir="ltr" list="name-options" required>
+              <datalist id="name-options"></datalist>
+
+              <div class="grid four">
+                <div>
+                  <label for="f-unit">יחידת מכירה (UOM)</label>
+                  <input id="f-unit" dir="ltr" list="unit-options" placeholder="Each / Pack of 25">
+                  <datalist id="unit-options"><option value="Each"><option value="Pair"><option value="Pack of 10"><option value="Pack of 25"><option value="Pack of 50"><option value="Pack of 100"></datalist>
+                </div>
+                <div>
+                  <label for="f-qty">כמות <small id="f-qty-hint"></small></label>
+                  <input id="f-qty" type="number" min="1" value="1" required>
+                </div>
+                <div>
+                  <label for="f-price">מחיר ליחידה ($)</label>
+                  <input id="f-price" dir="ltr" inputmode="decimal">
+                </div>
+                <div>
+                  <label>סה״כ</label>
+                  <div id="f-total" class="total" dir="ltr">—</div>
+                </div>
               </div>
-              <div>
-                <label for="f-price">מחיר ליחידה ($)</label>
-                <input id="f-price" dir="ltr" readonly>
+              <div id="f-tiers" class="tiers hidden"></div>
+
+              <div class="grid two">
+                <div>
+                  <label for="f-project">פרויקט</label>
+                  <select id="f-project" required></select>
+                </div>
+                <div>
+                  <label for="f-purpose">מטרה (בקצרה)</label>
+                  <input id="f-purpose" placeholder="למה צריך את זה">
+                </div>
               </div>
-            </div>
-            <div class="grid two">
-              <div>
-                <label for="f-requester">מי מבקש</label>
-                <input id="f-requester">
+              <p class="muted small">מזמין: <b id="f-requester"></b> · תאריך: <span id="f-date"></span></p>
+              <div class="actions">
+                <button type="submit" class="primary">הוסף לרשימה</button>
+                <button type="button" id="cancel-btn" class="link">ביטול</button>
               </div>
-              <div>
-                <label for="f-note">הערה (פרויקט, דחיפות…)</label>
-                <input id="f-note">
-              </div>
-            </div>
-            <div class="actions">
-              <button type="submit" class="primary">הוסף לרשימה</button>
-              <button type="button" id="cancel-btn" class="link">ביטול</button>
             </div>
           </div>
-        </div>
-      </form>
+        </form>
 
-      <div class="card">
-        <div class="list-head">
-          <h2>רשימה פתוחה <span id="open-count" class="badge">0</span></h2>
-          <div class="list-actions">
-            <a class="btn" href="/api/export.xlsx?status=open">ייצוא לאקסל</a>
-            <button id="copy-btn" type="button" title="מק״ט וכמות בכל שורה, להדבקה בהזמנה מהירה ב-McMaster">העתק להזמנה מהירה</button>
-            <button id="ordered-btn" type="button" class="danger">סמן הכל כ"הוזמן"</button>
+        <div class="card">
+          <div class="list-head">
+            <h2>הפריטים שלי ברשימה הנוכחית <span id="mine-count" class="badge">0</span></h2>
+            <span class="muted small">הרשימה נסגרת כשהרכש מבצע את ההזמנה.</span>
           </div>
+          <div class="table-wrap"><table id="mine-table"></table></div>
         </div>
-        <table id="open-table">
-          <thead><tr><th></th><th>מק״ט</th><th>שם</th><th>יחידה</th><th>כמות</th><th>מבקש</th><th>הערה</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <p id="open-empty" class="empty">הרשימה ריקה.</p>
-      </div>
-    </section>
+      </section>
 
-    <section id="tab-history" class="hidden">
-      <div class="card">
-        <div class="list-head">
-          <h2>הוזמנו</h2>
-          <a class="btn" href="/api/export.xlsx?status=ordered">ייצוא לאקסל</a>
+      <!-- ----- my last placed order ----- -->
+      <section id="tab-last" class="hidden">
+        <div class="card">
+          <h2 id="last-title">ההזמנה האחרונה שלי</h2>
+          <div class="table-wrap"><table id="last-table"></table></div>
         </div>
-        <table id="history-table">
-          <thead><tr><th>תאריך הזמנה</th><th>מק״ט</th><th>שם</th><th>יחידה</th><th>כמות</th><th>מבקש</th><th>הערה</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
+      </section>
 
-    <section id="tab-help" class="hidden">
-      <div class="card">
-        <h2>כפתור מהיר מתוך McMaster</h2>
-        <p>אם החיפוש האוטומטי נחסם או לא מזהה מוצר, אפשר להוסיף ישירות מהאתר של McMaster:</p>
-        <ol>
-          <li>גרור את הכפתור הזה לסרגל הסימניות: <a id="bookmarklet" class="btn primary" href="#">➕ הוסף לרשימה</a></li>
-          <li>פתח את דף המוצר ב-McMaster (כתובת בסגנון <code dir="ltr">mcmaster.com/91251A540/</code>).</li>
-          <li>לחץ על הסימניה – ייפתח כאן טופס מלא עם שם, יחידה ותמונה. בחר כמות והוסף.</li>
-        </ol>
+      <!-- ----- purchasing: everyone's open lines ----- -->
+      <section id="tab-purchase" class="hidden">
+        <div class="card">
+          <div class="list-head">
+            <h2>הרשימה הפתוחה – כל המזמינים <span id="all-count" class="badge">0</span></h2>
+            <div class="list-actions">
+              <a class="btn" href="/api/export.xlsx">ייצוא לאקסל</a>
+              <button id="copy-btn" type="button" title="מק״ט וכמות בכל שורה, להדבקה בהזמנה מהירה ב-McMaster">העתק להזמנה מהירה</button>
+              <button id="place-btn" type="button" class="primary">ביצעתי את ההזמנה…</button>
+            </div>
+          </div>
+          <div class="table-wrap"><table id="all-table"></table></div>
+        </div>
+      </section>
+
+      <!-- ----- history (admin) ----- -->
+      <section id="tab-history" class="hidden">
+        <div class="card">
+          <h2>הזמנות שבוצעו</h2>
+          <div class="table-wrap"><table id="orders-table"></table></div>
+        </div>
+        <div class="card hidden" id="order-detail">
+          <div class="list-head">
+            <h2 id="order-title"></h2>
+            <a class="btn" id="order-export">ייצוא לאקסל</a>
+          </div>
+          <div class="table-wrap"><table id="order-table"></table></div>
+        </div>
+      </section>
+
+      <!-- ----- admin ----- -->
+      <section id="tab-admin" class="hidden">
+        <div class="card">
+          <h2>משתמשים</h2>
+          <div class="table-wrap"><table id="users-table"></table></div>
+          <form id="user-form" class="grid five inline-form">
+            <input id="u-name" placeholder="שם מלא" required>
+            <input id="u-user" placeholder="שם משתמש" dir="ltr" required>
+            <input id="u-pass" placeholder="סיסמה זמנית" dir="ltr" required>
+            <select id="u-role"><option value="user">משתמש</option><option value="admin">מנהל / רכש</option></select>
+            <button class="primary" type="submit">הוסף משתמש</button>
+          </form>
+        </div>
+        <div class="card">
+          <h2>פרויקטים</h2>
+          <p class="muted small">אלה האפשרויות ברשימת "פרויקט" בטופס ההזמנה.</p>
+          <div id="projects-list" class="chips"></div>
+          <form id="project-form" class="row">
+            <input id="p-name" placeholder="שם פרויקט חדש">
+            <button type="submit">הוסף</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- ----- bookmarklet ----- -->
+      <section id="tab-help" class="hidden">
+        <div class="card">
+          <h2>כפתור מהיר מתוך McMaster</h2>
+          <p>אם החיפוש האוטומטי לא מצליח, אפשר להוסיף ישירות מהאתר של McMaster:</p>
+          <ol>
+            <li>גרור את הכפתור הזה לסרגל הסימניות: <a id="bookmarklet" class="btn primary" href="#">➕ הוסף לרשימה</a></li>
+            <li>פתח את דף המוצר ב-McMaster (כתובת בסגנון <code dir="ltr">mcmaster.com/8336N108/</code>).</li>
+            <li>לחץ על הסימניה – ייפתח כאן טופס מלא. בחר כמות ופרויקט והוסף.</li>
+          </ol>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===== dialogs ===== -->
+  <dialog id="place-dialog">
+    <form method="dialog" id="place-form">
+      <h2>סגירת הזמנה</h2>
+      <p id="place-summary"></p>
+      <label for="po-number">מספר PO של McMaster</label>
+      <input id="po-number" dir="ltr" placeholder="984826">
+      <label for="po-date">תאריך הזמנה</label>
+      <input id="po-date" type="date">
+      <div class="actions">
+        <button class="primary" value="ok">סגור הזמנה והעבר להיסטוריה</button>
+        <button class="link" value="cancel" formnovalidate>ביטול</button>
       </div>
-    </section>
-  </main>
+    </form>
+  </dialog>
+  <dialog id="pw-dialog">
+    <form method="dialog" id="pw-form">
+      <h2>שינוי סיסמה</h2>
+      <label for="pw-old">סיסמה נוכחית</label>
+      <input id="pw-old" type="password" dir="ltr" autocomplete="current-password">
+      <label for="pw-new">סיסמה חדשה</label>
+      <input id="pw-new" type="password" dir="ltr" autocomplete="new-password">
+      <div class="actions">
+        <button class="primary" value="ok">שמור</button>
+        <button class="link" value="cancel" formnovalidate>ביטול</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>

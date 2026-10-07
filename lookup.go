@@ -35,14 +35,15 @@ type LookupError struct{ Msg string }
 func (e *LookupError) Error() string { return e.Msg }
 
 type extracted struct {
-	PartNumber string   `json:"partNumber"`
-	Names      []string `json:"names"`
-	Unit       string   `json:"unit"`
-	Price      string   `json:"price"`
-	Image      string   `json:"image"`
-	URL        string   `json:"url"`
-	Blocked    bool     `json:"blocked"`
-	NotFound   bool     `json:"notFound"`
+	PartNumber string      `json:"partNumber"`
+	Names      []string    `json:"names"`
+	Unit       string      `json:"unit"`
+	Price      string      `json:"price"`
+	Tiers      []PriceTier `json:"tiers"`
+	Image      string      `json:"image"`
+	URL        string      `json:"url"`
+	Blocked    bool        `json:"blocked"`
+	NotFound   bool        `json:"notFound"`
 }
 
 // Scraper opens a McMaster-Carr product page in the computer's own Chrome or
@@ -190,7 +191,7 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 
 	p := &Part{
 		PartNumber: pn, Name: data.Names[0], NameOptions: data.Names,
-		Unit: data.Unit, Price: data.Price, ImageURL: data.Image, Source: "auto",
+		Unit: data.Unit, Tiers: data.Tiers, ImageURL: data.Image, Source: "auto",
 	}
 	if len(p.NameOptions) > 6 {
 		p.NameOptions = p.NameOptions[:6]

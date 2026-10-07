@@ -4,20 +4,24 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xuri/excelize/v2"
 )
 
 var png1x1, _ = base64.StdEncoding.DecodeString(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 
-// fakeMcMaster serves a client-rendered product page for 91251A540 and an
-// "Access Denied" page for everything else.
+// ---------- fake McMaster + real browser ----------
+
 func fakeMcMaster(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -26,57 +30,14 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			w.Write(png1x1)
 		case strings.HasPrefix(r.URL.Path, "/91251A540"):
 			http.ServeFile(w, r, "testdata/product.html")
+		case strings.HasPrefix(r.URL.Path, "/8336N108"):
+			http.ServeFile(w, r, "testdata/tiered.html")
 		default:
 			http.ServeFile(w, r, "testdata/blocked.html")
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
-}
-
-func newTestScraper(t *testing.T, base string) *Scraper {
-	t.Setenv("MCM_BASE_URL", base)
-	t.Setenv("MCM_MIN_INTERVAL", "0")
-	t.Setenv("MCM_TIMEOUT", "8")
-	if _, err := os.Stat("/opt/pw-browsers/chromium"); err == nil && os.Getenv("MCM_BROWSER_PATH") == "" {
-		t.Setenv("MCM_BROWSER_PATH", "/opt/pw-browsers/chromium")
-	}
-	s := NewScraper(browserTempDir(t))
-	if s.BrowserPath == "" && os.Getenv("CI") == "" {
-		if _, err := os.Stat("/usr/bin/chromium"); err != nil {
-			t.Skip("no browser available")
-		}
-	}
-	return s
-}
-
-func TestScraperExtractsProduct(t *testing.T) {
-	s := newTestScraper(t, fakeMcMaster(t).URL)
-	p, err := s.Lookup("91251A540")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "Black-Oxide Alloy Steel Socket Head Screw" || p.Unit != "Pack of 100" || p.Price != "12.34" {
-		t.Fatalf("bad extract: %+v", p)
-	}
-	if !contains(p.NameOptions, "M3 x 0.5 mm Thread, 8 mm Long") {
-		t.Fatalf("missing spec line in options: %v", p.NameOptions)
-	}
-	b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile))
-	if err != nil || !bytes.Equal(b, png1x1) {
-		t.Fatalf("image not saved: %q %v", p.ImageFile, err)
-	}
-}
-
-func TestScraperReportsBlockAndSavesDebug(t *testing.T) {
-	s := newTestScraper(t, fakeMcMaster(t).URL)
-	_, err := s.Lookup("1234K56")
-	if err == nil || !strings.Contains(err.Error(), "חסם") {
-		t.Fatalf("want block error, got %v", err)
-	}
-	if m, _ := filepath.Glob(filepath.Join(s.DebugDir, "1234K56-*.html")); len(m) == 0 {
-		t.Fatal("debug html not saved")
-	}
 }
 
 // browserTempDir is like t.TempDir, but tolerates Chrome's helper processes
@@ -97,42 +58,129 @@ func browserTempDir(t *testing.T) string {
 	return dir
 }
 
-type countingScraper struct {
-	calls int
-	part  *Part
+func newTestScraper(t *testing.T, base string) *Scraper {
+	t.Setenv("MCM_BASE_URL", base)
+	t.Setenv("MCM_MIN_INTERVAL", "0")
+	t.Setenv("MCM_TIMEOUT", "8")
+	if _, err := os.Stat("/opt/pw-browsers/chromium"); err == nil && os.Getenv("MCM_BROWSER_PATH") == "" {
+		t.Setenv("MCM_BROWSER_PATH", "/opt/pw-browsers/chromium")
+	}
+	return NewScraper(browserTempDir(t))
 }
 
-func (c *countingScraper) Lookup(pn string) (*Part, error) {
+func TestScraperExtractsProduct(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	p, err := s.Lookup("91251A540")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "Black-Oxide Alloy Steel Socket Head Screw" || p.Unit != "Pack of 100" {
+		t.Fatalf("bad extract: %+v", p)
+	}
+	if len(p.Tiers) != 1 || p.Tiers[0] != (PriceTier{Min: 1, Max: 0, Price: 12.34}) {
+		t.Fatalf("single price should become one tier: %+v", p.Tiers)
+	}
+	if !contains(p.NameOptions, "M3 x 0.5 mm Thread, 8 mm Long") {
+		t.Fatalf("missing spec line in options: %v", p.NameOptions)
+	}
+	b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile))
+	if err != nil || !bytes.Equal(b, png1x1) {
+		t.Fatalf("image not saved: %q %v", p.ImageFile, err)
+	}
+}
+
+func TestScraperExtractsQuantityTiers(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	p, err := s.Lookup("8336N108")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PriceTier{{Min: 1, Max: 11, Price: 28.46}, {Min: 12, Max: 0, Price: 25.93}}
+	if fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
+		t.Fatalf("tiers = %+v, want %+v (the 8-32 thread size must not count)", p.Tiers, want)
+	}
+	if p.Unit != "Pair" {
+		t.Fatalf("unit from the tier rows should win over a stray 'Each': %q", p.Unit)
+	}
+}
+
+func TestScraperReportsBlockAndSavesDebug(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	_, err := s.Lookup("1234K56")
+	if err == nil || !strings.Contains(err.Error(), "חסם") {
+		t.Fatalf("want block error, got %v", err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(s.DebugDir, "1234K56-*.html")); len(m) == 0 {
+		t.Fatal("debug html not saved")
+	}
+}
+
+func TestExternalExtractorOverrides(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	override := `() => ({partNumber: "91251A540", names: ["From override"], unit: "Each", tiers: [], image: "", blocked: false, notFound: false})`
+	os.WriteFile(s.Extractor.OverridePath, []byte(override), 0o644)
+	p, err := s.Lookup("91251A540")
+	if err != nil || p.Name != "From override" {
+		t.Fatalf("override not used: %+v %v", p, err)
+	}
+	os.WriteFile(s.Extractor.OverridePath, []byte("() => { syntax error"), 0o644)
+	if _, err := s.Lookup("91251A540"); err == nil || !strings.Contains(err.Error(), "extractor.js") {
+		t.Fatalf("broken override should be named in the error, got %v", err)
+	}
+}
+
+// ---------- pricing ----------
+
+func TestUnitPriceFor(t *testing.T) {
+	tiers := []PriceTier{{1, 11, 28.46}, {12, 0, 25.93}}
+	for qty, want := range map[int]float64{1: 28.46, 11: 28.46, 12: 25.93, 500: 25.93} {
+		if got := unitPriceFor(tiers, qty); got != want {
+			t.Errorf("qty %d: got %v want %v", qty, got, want)
+		}
+	}
+	if unitPriceFor(nil, 3) != 0 {
+		t.Error("no tiers means no price")
+	}
+}
+
+// ---------- API ----------
+
+type stubScraper struct {
+	calls int
+	parts map[string]*Part
+}
+
+func (c *stubScraper) Lookup(pn string) (*Part, error) {
 	c.calls++
-	if c.part == nil {
+	p, ok := c.parts[pn]
+	if !ok {
 		return nil, &LookupError{"blocked"}
 	}
-	p := *c.part
-	return &p, nil
+	cp := *p
+	return &cp, nil
 }
 
-func newTestServer(t *testing.T, sc interface{ Lookup(string) (*Part, error) }) *httptest.Server {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "orders.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(NewServer(store, sc, t.TempDir(), Extractor{}))
-	t.Cleanup(srv.Close)
-	return srv
+type client struct {
+	t    *testing.T
+	base string
+	hc   *http.Client
 }
 
-func call(t *testing.T, method, url string, body any) (int, map[string]any) {
-	var rd *bytes.Reader
+func newClient(t *testing.T, base string) *client {
+	jar, _ := cookiejar.New(nil)
+	return &client{t, base, &http.Client{Jar: jar}}
+}
+
+func (c *client) do(method, path string, body any) (int, map[string]any) {
+	c.t.Helper()
+	var b []byte
 	if body != nil {
-		b, _ := json.Marshal(body)
-		rd = bytes.NewReader(b)
-	} else {
-		rd = bytes.NewReader(nil)
+		b, _ = json.Marshal(body)
 	}
-	req, _ := http.NewRequest(method, url, rd)
-	resp, err := http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(method, c.base+path, bytes.NewReader(b))
+	resp, err := c.hc.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		c.t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	var out map[string]any
@@ -140,112 +188,241 @@ func call(t *testing.T, method, url string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-func TestLookupCachesAndValidates(t *testing.T) {
-	sc := &countingScraper{part: &Part{PartNumber: "91251A540", Name: "Screw", Unit: "Each"}}
-	srv := newTestServer(t, sc)
-	if code, _ := call(t, "GET", srv.URL+"/api/lookup?pn=hello", nil); code != 400 {
-		t.Fatalf("garbage pn: %d", code)
+func (c *client) mustOK(method, path string, body any) map[string]any {
+	c.t.Helper()
+	code, out := c.do(method, path, body)
+	if code != 200 {
+		c.t.Fatalf("%s %s: %d %v", method, path, code, out)
 	}
-	_, a := call(t, "GET", srv.URL+"/api/lookup?pn=91251a540", nil)
-	_, b := call(t, "GET", srv.URL+"/api/lookup?pn=91251A540", nil)
-	if sc.calls != 1 || a["part"].(map[string]any)["cached"] != false || b["part"].(map[string]any)["cached"] != true {
-		t.Fatalf("cache broken: calls=%d a=%v b=%v", sc.calls, a, b)
-	}
-	call(t, "GET", srv.URL+"/api/lookup?pn=91251A540&refresh=1", nil)
-	if sc.calls != 2 {
-		t.Fatal("refresh should bypass cache")
-	}
+	return out
 }
 
-func TestLookupFailureGivesManualLink(t *testing.T) {
-	srv := newTestServer(t, &countingScraper{})
-	code, out := call(t, "GET", srv.URL+"/api/lookup?pn=1234K56", nil)
-	if code != 502 || out["url"] != "https://www.mcmaster.com/1234K56/" {
-		t.Fatalf("got %d %v", code, out)
+func items(out map[string]any) []map[string]any {
+	var res []map[string]any
+	for _, x := range out["items"].([]any) {
+		res = append(res, x.(map[string]any))
 	}
+	return res
 }
 
-func TestListFlowAndExport(t *testing.T) {
-	sc := &countingScraper{}
-	srv := newTestServer(t, sc)
-	item := map[string]any{"part_number": "91251A540", "name": "Screw", "unit": "Pack of 100", "quantity": "2", "requester": "דני"}
-	if code, out := call(t, "POST", srv.URL+"/api/items", item); code != 200 {
-		t.Fatalf("add: %d %v", code, out)
+// world: a server with an admin (logged in as `admin`), two users, one project.
+func world(t *testing.T, sc Lookuper) (srvURL string, admin, dana, yossi *client) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "orders.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	item["quantity"] = 0
-	if code, _ := call(t, "POST", srv.URL+"/api/items", item); code != 400 {
-		t.Fatal("quantity 0 must be rejected")
+	srv := httptest.NewServer(NewServer(store, sc, t.TempDir(), Extractor{}))
+	t.Cleanup(srv.Close)
+	admin = newClient(t, srv.URL)
+	admin.mustOK("POST", "/api/setup", map[string]any{"name": "Rachel Purchasing", "username": "rachel", "password": "pass1"})
+	admin.mustOK("PUT", "/api/projects", map[string]any{"projects": []string{"CWC", "Lab (Hanoch)"}})
+	for _, u := range []string{"dana", "yossi"} {
+		admin.mustOK("POST", "/api/users", map[string]any{"name": strings.ToUpper(u[:1]) + u[1:], "username": u, "password": "pw-" + u})
 	}
-	_, list := call(t, "GET", srv.URL+"/api/items", nil)
-	items := list["items"].([]any)
-	first := items[0].(map[string]any)
-	if len(items) != 1 || first["quantity"].(float64) != 2 {
-		t.Fatalf("list: %v", items)
+	dana, yossi = newClient(t, srv.URL), newClient(t, srv.URL)
+	dana.mustOK("POST", "/api/login", map[string]any{"username": "dana", "password": "pw-dana"})
+	yossi.mustOK("POST", "/api/login", map[string]any{"username": "YOSSI", "password": "pw-yossi"})
+	return srv.URL, admin, dana, yossi
+}
+
+func TestAuth(t *testing.T) {
+	url, admin, dana, _ := world(t, &stubScraper{})
+	anon := newClient(t, url)
+	if code, out := anon.do("GET", "/api/me", nil); code != 200 || out["user"] != nil || out["needs_setup"] == true {
+		t.Fatalf("anonymous /api/me: %d %v", code, out)
 	}
-	id := int(first["id"].(float64))
-	idURL := srv.URL + "/api/items/" + itoa(id)
-	call(t, "PATCH", idURL, map[string]any{"quantity": 5})
-	if code, _ := call(t, "PATCH", idURL, map[string]any{"quantity": "x"}); code != 400 {
-		t.Fatal("bad quantity must be rejected")
+	if code, _ := anon.do("GET", "/api/items", nil); code != 401 {
+		t.Fatal("items must need login")
 	}
-	_, list = call(t, "GET", srv.URL+"/api/items", nil)
-	if list["items"].([]any)[0].(map[string]any)["quantity"].(float64) != 5 {
-		t.Fatal("patch failed")
+	if code, _ := anon.do("POST", "/api/setup", map[string]any{"name": "x", "username": "x", "password": "xxxx"}); code != 409 {
+		t.Fatal("setup must only work once")
+	}
+	if code, _ := anon.do("POST", "/api/login", map[string]any{"username": "dana", "password": "wrong"}); code != 401 {
+		t.Fatal("wrong password accepted")
+	}
+	if code, _ := dana.do("GET", "/api/users", nil); code != 403 {
+		t.Fatal("non-admin reached user admin")
+	}
+	for _, p := range []string{"/api/orders", "/api/items?scope=all"} {
+		code, out := dana.do("GET", p, nil)
+		if p == "/api/orders" && code != 403 {
+			t.Fatalf("non-admin reached %s", p)
+		}
+		_ = out
 	}
 
-	resp, err := http.Get(srv.URL + "/api/export.xlsx")
+	// disabling a user ends their session
+	users := admin.mustOK("GET", "/api/users", nil)["users"].([]any)
+	var danaID float64
+	for _, u := range users {
+		if u.(map[string]any)["username"] == "dana" {
+			danaID = u.(map[string]any)["id"].(float64)
+		}
+	}
+	admin.mustOK("PATCH", fmt.Sprintf("/api/users/%d", int(danaID)), map[string]any{"active": false})
+	if code, _ := dana.do("GET", "/api/items", nil); code != 401 {
+		t.Fatal("disabled user still logged in")
+	}
+
+	// the only admin cannot demote or disable themselves
+	if code, _ := admin.do("PATCH", "/api/users/1", map[string]any{"role": "user"}); code != 400 {
+		t.Fatal("last admin was demoted")
+	}
+	admin.mustOK("GET", "/api/users", nil) // still admin
+
+	// password change
+	admin.mustOK("POST", "/api/me/password", map[string]any{"old": "pass1", "new": "pass2"})
+	fresh := newClient(t, url)
+	fresh.mustOK("POST", "/api/login", map[string]any{"username": "rachel", "password": "pass2"})
+}
+
+func TestOrderFlow(t *testing.T) {
+	sc := &stubScraper{parts: map[string]*Part{
+		"8336N108": {PartNumber: "8336N108", Name: "Shoulder Bolt", Unit: "Pair", Source: "auto",
+			Tiers: []PriceTier{{1, 11, 28.46}, {12, 0, 25.93}}},
+	}}
+	_, admin, dana, yossi := world(t, sc)
+
+	// lookup + add with tiered price: 12 pairs -> $25.93 each
+	dana.mustOK("GET", "/api/lookup?pn=8336n108", nil)
+	if code, _ := dana.do("POST", "/api/items", map[string]any{"part_number": "8336N108", "name": "Shoulder Bolt", "quantity": 12}); code != 400 {
+		t.Fatal("project must be required")
+	}
+	added := dana.mustOK("POST", "/api/items", map[string]any{
+		"part_number": "8336N108", "name": "Shoulder Bolt", "unit": "Pair", "quantity": "12",
+		"project": "CWC", "purpose": "fixture",
+		"tiers": []PriceTier{{1, 0, 1.00}}, // a tampered price from the browser is ignored for looked-up parts
+	})["item"].(map[string]any)
+	if added["unit_price"] != 25.93 || added["total"] != 311.16 || added["requester"] != "Dana" {
+		t.Fatalf("pricing/requester wrong: %v", added)
+	}
+	danaItem := int(added["id"].(float64))
+
+	// lowering qty to 11 moves to the higher tier
+	upd := dana.mustOK("PATCH", fmt.Sprintf("/api/items/%d", danaItem), map[string]any{"quantity": 11})["item"].(map[string]any)
+	if upd["unit_price"] != 28.46 || upd["total"] != 313.06 {
+		t.Fatalf("re-pricing on qty change: %v", upd)
+	}
+
+	// manual part: unit price typed by the user
+	yossiItem := yossi.mustOK("POST", "/api/items", map[string]any{
+		"part_number": "1234K56", "name": "Manual Washer", "unit": "Pack of 25", "quantity": 2,
+		"unit_price": "$10.35", "project": "Lab (Hanoch)",
+	})["item"].(map[string]any)
+	if yossiItem["total"] != 20.7 {
+		t.Fatalf("manual price: %v", yossiItem)
+	}
+
+	// each user sees only their own lines; admin sees all
+	if n := len(items(dana.mustOK("GET", "/api/items", nil))); n != 1 {
+		t.Fatalf("dana sees %d lines", n)
+	}
+	if n := len(items(dana.mustOK("GET", "/api/items?scope=all", nil))); n != 1 {
+		t.Fatal("scope=all must be ignored for non-admins")
+	}
+	if n := len(items(admin.mustOK("GET", "/api/items?scope=all", nil))); n != 2 {
+		t.Fatalf("admin sees %d lines", n)
+	}
+	// users cannot touch each other's lines
+	if code, _ := yossi.do("PATCH", fmt.Sprintf("/api/items/%d", danaItem), map[string]any{"quantity": 99}); code != 403 {
+		t.Fatal("yossi edited dana's line")
+	}
+	if code, _ := yossi.do("DELETE", fmt.Sprintf("/api/items/%d", danaItem), nil); code != 403 {
+		t.Fatal("yossi deleted dana's line")
+	}
+	if code, _ := dana.do("POST", "/api/orders", map[string]any{"ids": []int{danaItem}}); code != 403 {
+		t.Fatal("non-admin placed an order")
+	}
+
+	// export of the open list
+	resp, err := admin.hc.Get(admin.base + "/api/export.xlsx")
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatal("export failed")
 	}
-	head := make([]byte, 2)
-	resp.Body.Read(head)
+	f, err := excelize.OpenReader(resp.Body)
 	resp.Body.Close()
-	if string(head) != "PK" {
-		t.Fatal("export is not an xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := f.GetRows("McMaster")
+	if rows[0][2] != "McMaster Part Number" || rows[0][11] != "Total cost" || len(rows) != 4 {
+		t.Fatalf("export layout: %v", rows)
 	}
 
-	// manual entry is remembered: next lookup needs no scraping
-	_, lk := call(t, "GET", srv.URL+"/api/lookup?pn=91251A540", nil)
-	if sc.calls != 0 || lk["part"].(map[string]any)["name"] != "Screw" {
-		t.Fatalf("manual entry not cached: %v", lk)
+	// purchasing places the order
+	order := admin.mustOK("POST", "/api/orders", map[string]any{
+		"ids": []int{danaItem, int(yossiItem["id"].(float64))}, "po_number": "984826", "po_date": "2026-10-05",
+	})["order"].(map[string]any)
+	if order["items"].(float64) != 2 || order["total"] != 333.76 {
+		t.Fatalf("order: %v", order)
+	}
+	if n := len(items(admin.mustOK("GET", "/api/items?scope=all", nil))); n != 0 {
+		t.Fatal("open list not cleared")
 	}
 
-	_, mo := call(t, "POST", srv.URL+"/api/items/mark-ordered", map[string]any{"ids": []int{id}})
-	if mo["count"].(float64) != 1 {
-		t.Fatalf("mark ordered: %v", mo)
+	// dana sees only her lines of the last order; history is admin-only
+	last := dana.mustOK("GET", "/api/my-last-order", nil)
+	if its := items(last); len(its) != 1 || its[0]["part_number"] != "8336N108" {
+		t.Fatalf("my last order: %v", last)
 	}
-	_, open := call(t, "GET", srv.URL+"/api/items", nil)
-	_, hist := call(t, "GET", srv.URL+"/api/items?status=ordered", nil)
-	if len(open["items"].([]any)) != 0 || len(hist["items"].([]any)) != 1 {
-		t.Fatal("history move failed")
+	if last["order"].(map[string]any)["po_number"] != "984826" {
+		t.Fatal("po number missing")
+	}
+	if code, _ := dana.do("GET", "/api/orders/1", nil); code != 403 {
+		t.Fatal("non-admin read history")
+	}
+	hist := admin.mustOK("GET", "/api/orders", nil)["orders"].([]any)
+	if len(hist) != 1 || len(items(admin.mustOK("GET", "/api/orders/1", nil))) != 2 {
+		t.Fatal("history wrong")
+	}
+	// ordered lines are frozen
+	if code, _ := dana.do("PATCH", fmt.Sprintf("/api/items/%d", danaItem), map[string]any{"quantity": 3}); code != 404 {
+		t.Fatal("ordered line was edited")
+	}
+
+	// a manual entry is remembered for the next lookup
+	before := sc.calls
+	if p := yossi.mustOK("GET", "/api/lookup?pn=1234K56", nil)["part"].(map[string]any); p["name"] != "Manual Washer" || sc.calls != before {
+		t.Fatalf("manual part not cached: %v", p)
+	}
+}
+
+func TestLookupValidationAndFailure(t *testing.T) {
+	_, _, dana, _ := world(t, &stubScraper{})
+	if code, _ := dana.do("GET", "/api/lookup?pn=hello", nil); code != 400 {
+		t.Fatal("garbage part number accepted")
+	}
+	code, out := dana.do("GET", "/api/lookup?pn=1234K56", nil)
+	if code != 502 || out["url"] != "https://www.mcmaster.com/1234K56/" {
+		t.Fatalf("failure should give a manual link: %d %v", code, out)
 	}
 }
 
 func TestStorePersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "orders.json")
 	s, _ := OpenStore(path)
-	s.AddItem(Item{PartNumber: "1A1", Name: "x", Quantity: 1})
+	s.AddUser(User{Username: "a", Name: "A", Role: "admin", Active: true})
+	s.AddItem(Item{PartNumber: "1A1", Name: "x", Quantity: 2, Tiers: []PriceTier{{1, 0, 1.5}}})
 	s2, err := OpenStore(path)
-	if err != nil || len(s2.ListItems("open")) != 1 {
+	if err != nil || len(s2.OpenItems(0)) != 1 || s2.OpenItems(0)[0].Total != 3 || s2.UserCount() != 1 {
 		t.Fatal("data not persisted")
 	}
-	id, _ := s2.AddItem(Item{PartNumber: "1A2", Name: "y", Quantity: 1})
-	if id != 2 {
-		t.Fatalf("ids must keep counting after reopen, got %d", id)
+	it, _ := s2.AddItem(Item{PartNumber: "1A2", Name: "y", Quantity: 1})
+	if it.ID != 2 {
+		t.Fatalf("ids must keep counting after reopen, got %d", it.ID)
 	}
 }
 
-func TestIndexAndBookmarklet(t *testing.T) {
-	srv := newTestServer(t, &countingScraper{})
-	for _, p := range []string{"/", "/add?pn=1", "/static/app.js"} {
-		resp, err := http.Get(srv.URL + p)
+func TestPagesAndBookmarklet(t *testing.T) {
+	url, _, dana, _ := world(t, &stubScraper{})
+	for _, p := range []string{"/", "/add?pn=1", "/static/app.js", "/api/ping"} {
+		resp, err := http.Get(url + p)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("%s: %v %v", p, err, resp)
 		}
 		resp.Body.Close()
 	}
-	_, out := call(t, "GET", srv.URL+"/api/bookmarklet", nil)
-	href, _ := out["href"].(string)
+	href, _ := dana.mustOK("GET", "/api/bookmarklet", nil)["href"].(string)
 	if !strings.HasPrefix(href, "javascript:") || !strings.Contains(href, "add%3F") || strings.Contains(href, "#") {
 		t.Fatalf("bad bookmarklet: %.80s", href)
 	}
@@ -258,23 +435,4 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
-}
-
-func itoa(i int) string { b, _ := json.Marshal(i); return string(b) }
-
-func TestExternalExtractorOverrides(t *testing.T) {
-	s := newTestScraper(t, fakeMcMaster(t).URL)
-	if _, ext := s.Extractor.JS(); ext {
-		t.Fatal("no override file yet")
-	}
-	override := `() => ({partNumber: "91251A540", names: ["From override"], unit: "Each", price: "", image: "", blocked: false, notFound: false})`
-	os.WriteFile(s.Extractor.OverridePath, []byte(override), 0o644)
-	p, err := s.Lookup("91251A540")
-	if err != nil || p.Name != "From override" {
-		t.Fatalf("override not used: %+v %v", p, err)
-	}
-	os.WriteFile(s.Extractor.OverridePath, []byte("() => { syntax error"), 0o644)
-	if _, err := s.Lookup("91251A540"); err == nil || !strings.Contains(err.Error(), "extractor.js") {
-		t.Fatalf("broken override should be named in the error, got %v", err)
-	}
 }
