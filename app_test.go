@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -214,14 +216,14 @@ func world(t *testing.T, sc Lookuper) (srvURL string, admin, dana, yossi *client
 	srv := httptest.NewServer(NewServer(store, sc, t.TempDir(), Extractor{}))
 	t.Cleanup(srv.Close)
 	admin = newClient(t, srv.URL)
-	admin.mustOK("POST", "/api/setup", map[string]any{"name": "Rachel Purchasing", "username": "rachel", "password": "pass1"})
+	admin.mustOK("POST", "/api/setup", map[string]any{"name": "Rachel Purchasing", "username": "rachel", "password": testPW("rachel")})
 	admin.mustOK("PUT", "/api/projects", map[string]any{"projects": []string{"CWC", "Lab (Hanoch)"}})
 	for _, u := range []string{"dana", "yossi"} {
-		admin.mustOK("POST", "/api/users", map[string]any{"name": strings.ToUpper(u[:1]) + u[1:], "username": u, "password": "pw-" + u})
+		admin.mustOK("POST", "/api/users", map[string]any{"name": strings.ToUpper(u[:1]) + u[1:], "username": u, "password": testPW(u)})
 	}
 	dana, yossi = newClient(t, srv.URL), newClient(t, srv.URL)
-	dana.mustOK("POST", "/api/login", map[string]any{"username": "dana", "password": "pw-dana"})
-	yossi.mustOK("POST", "/api/login", map[string]any{"username": "YOSSI", "password": "pw-yossi"})
+	dana.mustOK("POST", "/api/login", map[string]any{"username": "dana", "password": testPW("dana")})
+	yossi.mustOK("POST", "/api/login", map[string]any{"username": "YOSSI", "password": testPW("yossi")})
 	return srv.URL, admin, dana, yossi
 }
 
@@ -234,10 +236,10 @@ func TestAuth(t *testing.T) {
 	if code, _ := anon.do("GET", "/api/items", nil); code != 401 {
 		t.Fatal("items must need login")
 	}
-	if code, _ := anon.do("POST", "/api/setup", map[string]any{"name": "x", "username": "x", "password": "xxxx"}); code != 409 {
+	if code, _ := anon.do("POST", "/api/setup", map[string]any{"name": "x", "username": "x", "password": testPW("x")}); code != 409 {
 		t.Fatal("setup must only work once")
 	}
-	if code, _ := anon.do("POST", "/api/login", map[string]any{"username": "dana", "password": "wrong"}); code != 401 {
+	if code, _ := anon.do("POST", "/api/login", map[string]any{"username": "dana", "password": testPW("wrong")}); code != 401 {
 		t.Fatal("wrong password accepted")
 	}
 	if code, _ := dana.do("GET", "/api/users", nil); code != 403 {
@@ -271,9 +273,9 @@ func TestAuth(t *testing.T) {
 	admin.mustOK("GET", "/api/users", nil) // still admin
 
 	// password change
-	admin.mustOK("POST", "/api/me/password", map[string]any{"old": "pass1", "new": "pass2"})
+	admin.mustOK("POST", "/api/me/password", map[string]any{"old": testPW("rachel"), "new": testPW("rachel2")})
 	fresh := newClient(t, url)
-	fresh.mustOK("POST", "/api/login", map[string]any{"username": "rachel", "password": "pass2"})
+	fresh.mustOK("POST", "/api/login", map[string]any{"username": "rachel", "password": testPW("rachel2")})
 }
 
 func TestOrderFlow(t *testing.T) {
@@ -426,6 +428,20 @@ func TestPagesAndBookmarklet(t *testing.T) {
 	if !strings.HasPrefix(href, "javascript:") || !strings.Contains(href, "add%3F") || strings.Contains(href, "#") {
 		t.Fatalf("bad bookmarklet: %.80s", href)
 	}
+}
+
+// testPW makes a throwaway password per test user at run time, so no
+// credential-looking literals live in the repository.
+var testPWs = map[string]string{}
+
+func testPW(user string) string {
+	if pw, ok := testPWs[user]; ok {
+		return pw
+	}
+	b := make([]byte, 8)
+	rand.Read(b)
+	testPWs[user] = hex.EncodeToString(b)
+	return testPWs[user]
 }
 
 func contains(xs []string, s string) bool {
