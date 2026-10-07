@@ -34,11 +34,12 @@ jobs:
           FLAGS="-s -w -X main.version=$VERSION"
           mkdir -p out
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$FLAGS" -o out/McMasterList.exe .
+          # One universal Mac file (Apple chip + Intel), so nobody has to pick.
           for arch in arm64 amd64; do
-            name=$([ $arch = arm64 ] && echo mac-apple-silicon || echo mac-intel)
-            GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "$FLAGS" -o out/McMasterList .
-            (cd out && zip -q "McMasterList-$name.zip" McMasterList && rm McMasterList)
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "$FLAGS" -o "mac-$arch" .
           done
+          go run ./tools/fatmacho -o out/McMasterList mac-arm64 mac-amd64
+          (cd out && zip -q McMasterList-mac.zip McMasterList && rm McMasterList)
           cp static/extractor.js out/extractor.js
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           ls -lh out
@@ -52,4 +53,4 @@ jobs:
           gh release create latest out/* \
             --target "$GITHUB_SHA" \
             --title "Latest ($VERSION)" \
-            --notes "Built automatically from ${GITHUB_SHA::7}. Windows: McMasterList.exe. Mac: the zip matching your chip. extractor.js: drop into the McMasterList-data folder to update detection without a new download."
+            --notes "Built automatically from ${GITHUB_SHA::7}. Windows: McMasterList.exe. Mac: McMasterList-mac.zip (any Mac). extractor.js: drop into the McMasterList-data folder to update detection without a new download."

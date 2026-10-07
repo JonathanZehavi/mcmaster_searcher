@@ -13,8 +13,7 @@
 | מערכת | קובץ |
 |---|---|
 | Windows | [McMasterList.exe](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList.exe) |
-| Mac (M1/M2/M3/M4) | [McMasterList-mac-apple-silicon.zip](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList-mac-apple-silicon.zip) |
-| Mac (Intel) | [McMasterList-mac-intel.zip](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList-mac-intel.zip) |
+| Mac (כל דגם, M או Intel) | [McMasterList-mac.zip](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest/download/McMasterList-mac.zip) |
 
 כל הגרסאות נמצאות ב[דף ההורדות](https://github.com/jonathanzehavi/mcmaster_searcher/releases/latest).
 
