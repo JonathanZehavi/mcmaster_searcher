@@ -150,14 +150,9 @@ function renderTable(table, items, cols, emptyText) {
     table.innerHTML = `<tbody><tr><td class="empty">${emptyText}</td></tr></tbody>`;
     return;
   }
-  const sum = items.reduce((a, it) => a + (it.total || 0), 0);
-  const totalIdx = cols.indexOf("total");
   table.innerHTML =
     `<thead><tr>${cols.map((c) => `<th class="c-${c}">${COLS[c][0]}</th>`).join("")}</tr></thead>` +
-    `<tbody>${items.map((it) => `<tr data-id="${it.id}">${cols.map((c) => `<td class="c-${c}">${COLS[c][1](it)}</td>`).join("")}</tr>`).join("")}</tbody>` +
-    (totalIdx >= 0
-      ? `<tfoot><tr>${cols.map((c, i) => `<td class="c-${c}">${i === totalIdx ? `<b>${money(sum)}</b>` : i === totalIdx - 1 ? "סה״כ" : ""}</td>`).join("")}</tr></tfoot>`
-      : "");
+    `<tbody>${items.map((it) => `<tr data-id="${it.id}">${cols.map((c) => `<td class="c-${c}">${COLS[c][1](it)}</td>`).join("")}</tr>`).join("")}</tbody>`;
 }
 
 // Inline edits and deletes on editable tables.
@@ -347,7 +342,7 @@ async function loadMine() {
   const { items } = await api("/api/items");
   state.mine = items;
   $("#mine-count").textContent = items.length;
-  renderTable($("#mine-table"), items, ["img", "pn", "name", "unit", "price", "qtyEdit", "project", "purpose", "total", "del"], "עוד לא הוספת פריטים.");
+  renderTable($("#mine-table"), items, ["img", "pn", "name", "unit", "price", "qtyEdit", "requester", "date", "project", "purpose", "total", "del"], "עוד לא הוספת פריטים.");
 }
 wireEditable($("#mine-table"), loadMine);
 
@@ -357,7 +352,7 @@ async function loadLast() {
   $("#last-title").textContent = order
     ? `ההזמנה האחרונה שלי – ${day(order.po_date)}${order.po_number ? ` · PO ${order.po_number}` : ""}`
     : "ההזמנה האחרונה שלי";
-  renderTable($("#last-table"), items, ["img", "pn", "name", "unit", "price", "qty", "project", "purpose", "total"], "עוד לא בוצעה הזמנה עם פריטים שלך.");
+  renderTable($("#last-table"), items, ["img", "pn", "name", "unit", "price", "qty", "requester", "date", "project", "purpose", "total"], "עוד לא בוצעה הזמנה עם פריטים שלך.");
 }
 
 // ---------- purchasing (admin) ----------
@@ -382,8 +377,7 @@ $("#copy-btn").addEventListener("click", async () => {
 
 $("#place-btn").addEventListener("click", () => {
   if (!state.all.length) return toast("הרשימה ריקה.", true);
-  const sum = state.all.reduce((a, it) => a + it.total, 0);
-  $("#place-summary").textContent = `${state.all.length} פריטים, סה״כ ${money(sum)}. הפריטים יועברו להיסטוריה והרשימה תתאפס.`;
+  $("#place-summary").textContent = `${state.all.length} שורות יועברו להיסטוריה והרשימה תתאפס.`;
   $("#po-number").value = "";
   $("#po-date").value = new Date().toISOString().slice(0, 10);
   $("#place-dialog").showModal();
@@ -408,11 +402,11 @@ async function loadOrders() {
     return;
   }
   t.innerHTML =
-    `<thead><tr><th>תאריך</th><th>PO</th><th>פריטים</th><th>סה״כ</th><th>בוצע ע״י</th><th></th></tr></thead><tbody>` +
+    `<thead><tr><th>תאריך</th><th>PO</th><th>שורות</th><th>בוצע ע״י</th><th></th></tr></thead><tbody>` +
     orders
       .map(
         (o) => `<tr data-order="${o.id}"><td>${day(o.po_date)}</td><td dir="ltr">${esc(o.po_number) || "—"}</td><td>${o.items}</td>
-        <td><b>${money(o.total)}</b></td><td>${esc(o.ordered_by)}</td>
+        <td>${esc(o.ordered_by)}</td>
         <td><button class="link view">הצג</button> <a class="link" href="/api/export.xlsx?order=${o.id}">אקסל</a></td></tr>`
       )
       .join("") +

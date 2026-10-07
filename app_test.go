@@ -67,7 +67,9 @@ func newTestScraper(t *testing.T, base string) *Scraper {
 	if _, err := os.Stat("/opt/pw-browsers/chromium"); err == nil && os.Getenv("MCM_BROWSER_PATH") == "" {
 		t.Setenv("MCM_BROWSER_PATH", "/opt/pw-browsers/chromium")
 	}
-	return NewScraper(browserTempDir(t))
+	s := NewScraper(browserTempDir(t))
+	t.Cleanup(s.Close)
+	return s
 }
 
 func TestScraperExtractsProduct(t *testing.T) {
@@ -379,7 +381,7 @@ func TestOrderFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, _ := f.GetRows("McMaster")
-	if rows[0][2] != "McMaster Part Number" || rows[0][11] != "Total cost" || len(rows) != 4 {
+	if rows[0][2] != "McMaster Part Number" || rows[0][11] != "Total cost" || len(rows) != 3 {
 		t.Fatalf("export layout: %v", rows)
 	}
 

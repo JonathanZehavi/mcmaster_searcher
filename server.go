@@ -404,20 +404,16 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 	f.SetCellStyle(sheet, "A1", "L1", head)
 	usd := `"USD "#,##0.00`
 	money, _ := f.NewStyle(&excelize.Style{CustomNumFmt: &usd})
-	var sum float64
 	for i, it := range items {
 		row := []any{po, excelDate(poDate), it.PartNumber, it.Name, it.Unit, it.UnitPrice, it.Quantity,
 			it.Requester, excelDate(it.CreatedAt[:10]), it.Project, it.Purpose, it.Total}
 		cell, _ := excelize.CoordinatesToCellName(1, i+2)
 		f.SetSheetRow(sheet, cell, &row)
-		sum += it.Total
 	}
 	last := len(items) + 1
 	if len(items) > 0 {
 		f.SetCellStyle(sheet, "F2", fmt.Sprintf("F%d", last), money)
-		f.SetCellStyle(sheet, "L2", fmt.Sprintf("L%d", last+1), money)
-		f.SetCellValue(sheet, fmt.Sprintf("K%d", last+1), "Total")
-		f.SetCellValue(sheet, fmt.Sprintf("L%d", last+1), round2(sum))
+		f.SetCellStyle(sheet, "L2", fmt.Sprintf("L%d", last), money)
 	}
 	for i, width := range []float64{12, 12, 14, 60, 12, 12, 6, 14, 12, 16, 30, 13} {
 		col, _ := excelize.ColumnNumberToName(i + 1)

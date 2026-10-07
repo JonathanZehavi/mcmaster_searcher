@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -143,6 +145,15 @@ func main() {
 		fail("cannot open data file: " + err.Error())
 	}
 	scraper := NewScraper(dir)
+	// Close the shared browser when the window is closed or Ctrl+C is pressed,
+	// so no Chrome is left running in the background.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sig
+		scraper.Close()
+		os.Exit(0)
+	}()
 	srv := NewServer(store, scraper, scraper.ImagesDir, scraper.Extractor)
 
 	fmt.Println()
@@ -163,6 +174,9 @@ func main() {
 	fmt.Println()
 	if !noOpen {
 		openBrowser(localURL)
+	}
+	if os.Getenv("MCM_NO_WARMUP") != "1" {
+		go scraper.Warm()
 	}
 	if err := http.Serve(ln, srv); err != nil {
 		fail("server stopped: " + err.Error())

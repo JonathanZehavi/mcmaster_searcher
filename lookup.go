@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
@@ -44,6 +47,7 @@ type extracted struct {
 	URL        string      `json:"url"`
 	Blocked    bool        `json:"blocked"`
 	NotFound   bool        `json:"notFound"`
+	TextLength int         `json:"textLength"`
 }
 
 // Scraper opens a McMaster-Carr product page in the computer's own Chrome or
@@ -62,6 +66,13 @@ type Scraper struct {
 
 	mu   sync.Mutex
 	last time.Time
+
+	// One browser stays open between lookups (each lookup gets a fresh tab):
+	// starting Chrome every time cost seconds, and a warm cache makes McMaster's
+	// own scripts load much faster.
+	browserCtx  context.Context
+	stopBrowser func()
+	userAgent   string
 }
 
 func NewScraper(dataDir string) *Scraper {
@@ -69,8 +80,8 @@ func NewScraper(dataDir string) *Scraper {
 		BaseURL:     strings.TrimRight(envOr("MCM_BASE_URL", "https://www.mcmaster.com"), "/"),
 		BrowserPath: envOr("MCM_BROWSER_PATH", findBrowser()),
 		Headless:    os.Getenv("MCM_HEADLESS") != "0",
-		MinInterval: envDuration("MCM_MIN_INTERVAL", 4*time.Second),
-		Timeout:     envDuration("MCM_TIMEOUT", 25*time.Second),
+		MinInterval: envDuration("MCM_MIN_INTERVAL", 2*time.Second),
+		Timeout:     envDuration("MCM_TIMEOUT", 20*time.Second),
 		ProfileDir:  filepath.Join(dataDir, "browser-profile"),
 		ImagesDir:   filepath.Join(dataDir, "images"),
 		DebugDir:    filepath.Join(dataDir, "debug"),
@@ -114,14 +125,41 @@ func (s *Scraper) Lookup(pn string) (*Part, error) {
 		time.Sleep(wait)
 	}
 	defer func() { s.last = time.Now() }()
-	return s.lookup(pn)
+	start := time.Now()
+	p, err := s.lookup(pn)
+	log.Printf("lookup %s took %.1fs", pn, time.Since(start).Seconds())
+	return p, err
 }
 
-func (s *Scraper) lookup(pn string) (*Part, error) {
-	pageURL := fmt.Sprintf("%s/%s/", s.BaseURL, pn)
+// Warm starts the browser and loads McMaster's home page once, so the first
+// real lookup finds the browser running and the site's scripts cached.
+func (s *Scraper) Warm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureBrowser(); err != nil {
+		log.Printf("browser warm-up: %v", err)
+		return
+	}
+	tab, cancel := chromedp.NewContext(s.browserCtx)
+	defer cancel()
+	ctx, cancelT := context.WithTimeout(tab, s.Timeout)
+	defer cancelT()
+	_ = chromedp.Run(ctx, s.prepareTab(), navigateNoWait(s.BaseURL+"/"), chromedp.Sleep(3*time.Second))
+}
 
+// Close shuts the browser down (on exit, so no Chrome is left running).
+func (s *Scraper) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopBrowser != nil {
+		s.stopBrowser()
+		s.browserCtx, s.stopBrowser = nil, nil
+	}
+}
+
+func (s *Scraper) allocatorOptions(profile string) []chromedp.ExecAllocatorOption {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.UserDataDir(s.ProfileDir),
+		chromedp.UserDataDir(profile),
 		chromedp.WindowSize(1366, 900),
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -138,42 +176,138 @@ func (s *Scraper) lookup(pn string) (*Part, error) {
 	if s.BrowserPath != "" {
 		opts = append(opts, chromedp.ExecPath(s.BrowserPath))
 	}
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancelAlloc()
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	ctx, cancelT := context.WithTimeout(ctx, s.Timeout+20*time.Second)
+	return opts
+}
+
+// ensureBrowser starts the shared browser if it is not running (first use,
+// or it crashed / was closed).
+func (s *Scraper) ensureBrowser() error {
+	if s.browserCtx != nil && s.browserCtx.Err() == nil {
+		return nil
+	}
+	if s.stopBrowser != nil {
+		s.stopBrowser()
+	}
+	try := func(profile string) error {
+		allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), s.allocatorOptions(profile)...)
+		bctx, cancelB := chromedp.NewContext(allocCtx)
+		var ua string
+		err := chromedp.Run(bctx, chromedp.ActionFunc(func(c context.Context) error {
+			_, _, _, userAgent, _, err := browser.GetVersion().Do(c)
+			ua = userAgent
+			return err
+		}))
+		if err != nil {
+			cancelB()
+			cancelAlloc()
+			return err
+		}
+		s.browserCtx, s.userAgent = bctx, strings.Replace(ua, "HeadlessChrome", "Chrome", 1)
+		s.stopBrowser = func() { cancelB(); cancelAlloc() }
+		return nil
+	}
+	err := try(s.ProfileDir)
+	if err != nil {
+		// The saved profile can be locked by a Chrome left over from a crash;
+		// a throwaway profile still works (only cookies are lost).
+		if tmp, terr := os.MkdirTemp("", "mcm-profile-"); terr == nil {
+			err = try(tmp)
+		}
+	}
+	if err != nil {
+		return &LookupError{"לא הצלחתי להפעיל את הדפדפן (Chrome / Edge): " + firstLine(err.Error())}
+	}
+	return nil
+}
+
+// Things the page does not need for us to read it: fonts, video, trackers.
+var blockedURLs = []string{
+	"*.woff", "*.woff2", "*.ttf", "*.otf", "*.mp4", "*.webm",
+	"*google-analytics.com*", "*googletagmanager.com*", "*doubleclick.net*",
+	"*facebook.net*", "*hotjar*", "*bing.com*", "*clarity.ms*",
+}
+
+func (s *Scraper) prepareTab() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if err := emulation.SetUserAgentOverride(s.userAgent).WithAcceptLanguage("en-US,en").Do(ctx); err != nil {
+			return err
+		}
+		if err := network.Enable().Do(ctx); err != nil {
+			return err
+		}
+		return network.SetBlockedURLs(blockedURLs).Do(ctx)
+	})
+}
+
+// navigateNoWait starts loading a page without waiting for its load event;
+// McMaster keeps loading extras long after the product details are on screen.
+func navigateNoWait(url string) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		_, _, errText, _, err := page.Navigate(url).Do(ctx)
+		if err == nil && errText != "" {
+			err = fmt.Errorf("%s", errText)
+		}
+		return err
+	})
+}
+
+func (s *Scraper) lookup(pn string) (*Part, error) {
+	if err := s.ensureBrowser(); err != nil {
+		return nil, err
+	}
+	pageURL := fmt.Sprintf("%s/%s/", s.BaseURL, pn)
+	tab, cancelTab := chromedp.NewContext(s.browserCtx)
+	defer cancelTab()
+	ctx, cancelT := context.WithTimeout(tab, s.Timeout+15*time.Second)
 	defer cancelT()
 
-	// Headless browsers announce themselves as "HeadlessChrome"; look like the normal one.
-	var ua string
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
-		_, _, _, userAgent, _, err := browser.GetVersion().Do(c)
-		ua = strings.Replace(userAgent, "HeadlessChrome", "Chrome", 1)
-		return err
-	})); err != nil {
-		return nil, &LookupError{"לא הצלחתי להפעיל את הדפדפן (Chrome / Edge): " + firstLine(err.Error())}
+	if err := chromedp.Run(ctx, s.prepareTab(), navigateNoWait(pageURL)); err != nil {
+		if s.browserCtx.Err() != nil { // the browser itself died; restart next time
+			s.browserCtx = nil
+		}
+		debug := s.saveDebug(ctx, pn)
+		return nil, &LookupError{fmt.Sprintf("הדף של McMaster לא נטען: %s (נשמר דיבאג: %s).", firstLine(err.Error()), debug)}
 	}
 
-	navCtx, cancelNav := context.WithTimeout(ctx, s.Timeout)
-	_ = chromedp.Run(navCtx,
-		emulation.SetUserAgentOverride(ua).WithAcceptLanguage("en-US,en"),
-		chromedp.Navigate(pageURL),
-	)
-	// The page renders client-side; wait for a price or a heading, then let it settle.
-	var ready bool
-	_ = chromedp.Run(navCtx, chromedp.Poll(
-		`/\$\s?[\d,]+\.\d{2}/.test(document.body ? document.body.innerText : "") || !!document.querySelector("h1")`,
-		&ready, chromedp.WithPollingInterval(300*time.Millisecond)))
-	cancelNav()
-	_ = chromedp.Run(ctx, chromedp.Sleep(800*time.Millisecond))
-
-	var data extracted
+	// Read the page as it renders and stop as soon as the details are there,
+	// instead of waiting for everything to finish loading.
 	js, external := s.Extractor.JS()
-	if err := chromedp.Run(ctx, chromedp.Evaluate("("+js+"\n)()", &data)); err != nil {
+	expr := "(" + js + "\n)()"
+	var data extracted
+	var evalErr error
+	deadline := time.Now().Add(s.Timeout)
+	var namesSince time.Time
+	for time.Now().Before(deadline) {
+		var d extracted
+		evalErr = chromedp.Run(ctx, chromedp.Evaluate(expr, &d))
+		if evalErr == nil {
+			data = d
+			complete := len(d.Names) > 0 && (d.Price != "" || len(d.Tiers) > 0)
+			if len(d.Names) > 0 && namesSince.IsZero() {
+				namesSince = time.Now()
+			}
+			// Done: details are complete, the product has a name but shows no
+			// price after a few seconds, or the page is clearly a block/404
+			// (a near-empty page early on is just still rendering).
+			if complete || d.NotFound || (d.Blocked && d.TextLength >= 40) ||
+				(!namesSince.IsZero() && time.Since(namesSince) > 3*time.Second) {
+				if complete {
+					// One more look a moment later: the price table can finish a beat after the price.
+					time.Sleep(400 * time.Millisecond)
+					if chromedp.Run(ctx, chromedp.Evaluate(expr, &d)) == nil && len(d.Tiers) >= len(data.Tiers) {
+						data = d
+					}
+				}
+				break
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	if evalErr != nil && len(data.Names) == 0 {
 		debug := s.saveDebug(ctx, pn)
 		if external {
-			return nil, &LookupError{fmt.Sprintf("קובץ הזיהוי החיצוני (extractor.js) נכשל: %s (נשמר דיבאג: %s).", firstLine(err.Error()), debug)}
+			return nil, &LookupError{fmt.Sprintf("קובץ הזיהוי החיצוני (extractor.js) נכשל: %s (נשמר דיבאג: %s).", firstLine(evalErr.Error()), debug)}
 		}
 		return nil, &LookupError{fmt.Sprintf("הדף של McMaster לא נטען (נשמר דיבאג: %s).", debug)}
 	}
