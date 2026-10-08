@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -55,6 +56,16 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 		case strings.HasPrefix(r.URL.Path, "/img/"):
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(png1x1)
+		case r.URL.Path == "/data/product":
+			body, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(body), "6040K12") {
+				http.Error(w, "unknown part", 404)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"partNumber":"6040K12","name":"Recorded Spacer","price":"4.20","unit":"Each"}`))
+		case strings.HasPrefix(r.URL.Path, "/6040K12"):
+			http.ServeFile(w, r, "testdata/xhr.html")
 		case strings.HasPrefix(r.URL.Path, "/cdn/app.js"):
 			w.Header().Set("Content-Type", "text/javascript")
 			w.Write([]byte(`document.getElementById("app").innerHTML = "<h1>CDN Rendered Washer</h1><div>$1.25 Each</div>";`))
@@ -185,6 +196,41 @@ func TestNetworkDietFallsBack(t *testing.T) {
 	}
 	if !s.dietOff {
 		t.Fatal("diet should be off after it broke a page")
+	}
+}
+
+// The recorder keeps the page's data request (method, body, answer), which is
+// what a browser-free lookup would call directly.
+func TestRecorderCapturesDataRequests(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	p, err := s.Lookup("6040K12")
+	if err != nil || p.Name != "Recorded Spacer" {
+		t.Fatalf("lookup: %+v %v", p, err)
+	}
+	files, _ := filepath.Glob(filepath.Join(s.DebugDir, "6040K12-*-network.json"))
+	if len(files) != 1 {
+		t.Fatalf("want one recording, got %v", files)
+	}
+	b, _ := os.ReadFile(files[0])
+	var rec struct {
+		Outcome  string
+		Requests []netEntry
+	}
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	var found *netEntry
+	for i, e := range rec.Requests {
+		if strings.HasSuffix(e.URL, "/data/product") {
+			found = &rec.Requests[i]
+		}
+	}
+	if rec.Outcome != "ok" || found == nil {
+		t.Fatalf("data request not recorded: %s", b)
+	}
+	if found.Method != "POST" || !strings.Contains(found.PostData, "6040K12") || !found.HasPart ||
+		!strings.Contains(found.Body, "Recorded Spacer") || found.Status != 200 {
+		t.Fatalf("incomplete entry: %+v", found)
 	}
 }
 

@@ -1,0 +1,11 @@
+<!doctype html><html><head><title>McMaster-Carr</title></head>
+<body><div id="app"></div>
+<script>
+// Like a single-page app: the product details come from a background POST
+// call to the site's own data endpoint, then get drawn on the page.
+fetch("/data/product", { method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ partNumber: location.pathname.split("/")[1] }) })
+  .then(r => r.json())
+  .then(p => { document.getElementById("app").innerHTML =
+    `<h1>${p.name}</h1><div>$${p.price} ${p.unit}</div>`; });
+</script></body></html>

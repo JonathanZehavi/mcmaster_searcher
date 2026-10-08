@@ -512,8 +512,8 @@ func (s *Server) debugZip(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
-	if len(files) > 10 {
-		files = files[:10]
+	if len(files) > 16 {
+		files = files[:16]
 	}
 	if len(files) == 0 {
 		http.Error(w, "no debug files yet", 404)

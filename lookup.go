@@ -406,6 +406,10 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 	defer cancelTab()
 	ctx, cancelT := context.WithTimeout(tab, s.Timeout+15*time.Second)
 	defer cancelT()
+	// Note the page's data requests (saved before the tab closes; see recorder.go).
+	rec := startRecorder(tab, pn)
+	outcome := "failed"
+	defer func() { rec.save(s.DebugDir, pageURL, outcome) }()
 
 	if err := chromedp.Run(ctx, navigateNoWait(pageURL)); err != nil {
 		debug := s.saveDebug(ctx, pn)
@@ -484,6 +488,7 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 		stats.allowURL(data.Image)
 		p.ImageFile, how = s.saveImage(ctx, pn, data.Image)
 	}
+	outcome = "ok"
 	log.Printf("lookup %s: product shown after %.1fs, done %.1fs; diet=%v blocked=%d %v; image=%s",
 		pn, tShown.Seconds(), time.Since(t0).Seconds(), diet, stats.blocked.Load(), stats.hosts(), how)
 	return p, "", nil
