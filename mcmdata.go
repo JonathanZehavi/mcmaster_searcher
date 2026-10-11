@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,7 +78,7 @@ func parseOrderInfo(body, pn string) (*Part, bool) {
 	}
 	p := &Part{PartNumber: pn, Name: name, Unit: strings.TrimSpace(oi.UnitOfMeasure), Source: "auto"}
 	for _, n := range []string{name, parent, suffix} {
-		if n != "" && !contains(p.NameOptions, n) {
+		if n != "" && !slices.Contains(p.NameOptions, n) {
 			p.NameOptions = append(p.NameOptions, n)
 		}
 	}
