@@ -125,6 +125,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .pc-image:hover { border-color: var(--line-strong); background: #fff; }
 .pc-image img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .noimg { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.noimg .imgnote { font-size: 12px; color: var(--muted); max-width: 200px; text-align: center; }
 .noimg svg { width: 44px; height: 44px; fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .pc-body { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .pc-top { display: flex; align-items: center; gap: 8px; }

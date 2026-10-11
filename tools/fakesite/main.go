@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"flag"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -40,6 +41,35 @@ func main() {
 	flag.Parse()
 	log.Fatal(http.ListenAndServe(*addr, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/":
+			http.ServeFile(w, r, *dir+"/home.html")
+		case r.URL.Path == "/mv123/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Write([]byte("// site bundle"))
+		case r.URL.Path == "/mv123/WebParts/OrderServer/ProductOrderInfo.aspx":
+			pn := r.URL.Query().Get("partNumber")
+			w.Header().Set("Content-Type", "application/json")
+			if !strings.HasPrefix(pn, "7129K2") {
+				w.Write([]byte(`{"partNumber":"","unitOfMeasure":""}`))
+				return
+			}
+			fmt.Fprintf(w, `{"partNumber":%q,"unitOfMeasure":"Pack of 10","parentDescription":"Brass Hex Nut","suffixDescription":"Demo %s","pricingData":{"price":"$5.12 per pack of 10","priceLevels":[{"QuantityRangeMessage":"1-9 packs","SellPrice":5.12},{"QuantityRangeMessage":"10 or more","SellPrice":4.6}],"shouldShowPrice":true}}`, pn, pn)
+		case r.URL.Path == "/mv123/WebParts/Navigate/ProductContent.aspx":
+			pn := strings.ToLower(r.URL.Query().Get("partNumber"))
+			w.Header().Set("Content-Type", "application/json")
+			switch pn {
+			case "7129k23": // an image path that leads nowhere
+				w.Write([]byte(`{"displayImage":{"sourcePath":"/mvD/missing/7129k23.png"}}`))
+			case "7129k24": // no image at all
+				w.Write([]byte(`{"displayImage":null}`))
+			default:
+				fmt.Fprintf(w, `{"displayImage":{"sourcePath":"/mvD/Contents/gfx/ImageCache/712/%s-@100p.png?ver=1"}}`, pn)
+			}
+		case strings.HasPrefix(r.URL.Path, "/mvD/Contents/gfx/ImageCache/"):
+			w.Header().Set("Content-Type", "image/png")
+			w.Write(productPNG())
+		case strings.HasPrefix(r.URL.Path, "/7129K2"):
+			http.ServeFile(w, r, *dir+"/login-wall.html")
 		case strings.HasPrefix(r.URL.Path, "/img/protected"):
 			// Refuses downloads: only an <img> on the page gets it.
 			if r.Header.Get("Sec-Fetch-Dest") != "image" {

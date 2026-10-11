@@ -142,9 +142,15 @@ func partPayload(p *Part, cached bool) J {
 	if tiers == nil {
 		tiers = []PriceTier{}
 	}
+	local := ""
+	if p.ImageFile != "" {
+		local = "/images/" + p.ImageFile
+	}
 	return J{
 		"part_number": p.PartNumber, "name": p.Name, "name_options": opts, "unit": p.Unit,
 		"tiers": tiers, "image": image, "url": manualURL(p.PartNumber), "cached": cached,
+		// The browser tries McMaster's own address first, then the stored copy.
+		"image_url": p.ImageURL, "image_local": local, "image_note": p.ImageNote,
 	}
 }
 

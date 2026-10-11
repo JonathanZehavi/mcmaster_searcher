@@ -246,16 +246,7 @@ function showItemForm(part) {
   $("#f-qty").value = 1;
   $("#f-price").value = "";
   $("#f-qty-hint").textContent = packHint(part.unit);
-  const img = $("#f-img");
-  if (part.image) {
-    img.src = part.image;
-    img.style.display = "";
-    $("#f-noimg").style.display = "none";
-  } else {
-    img.removeAttribute("src");
-    img.style.display = "none";
-    $("#f-noimg").style.display = "";
-  }
+  setProductImage(part);
   $("#f-requester").value = state.me.name;
   $("#f-date").textContent = day(new Date().toISOString());
   $("#f-purpose").value = "";
@@ -391,10 +382,36 @@ $("#f-img-btn").addEventListener("click", () => {
   $("#img-big").src = src;
   $("#img-dialog").showModal();
 });
-$("#f-img").addEventListener("error", () => {
-  $("#f-img").style.display = "none";
-  $("#f-noimg").style.display = "";
-});
+// Product image: McMaster's own address first (the employee's browser can
+// load it), then the copy stored on the server. If none loads, say why.
+const IMAGE_NOTES = {
+  "no-path": "McMaster לא שלחו תמונה למוצר הזה",
+  "download-failed": "השרת לא הצליח להוריד את התמונה",
+};
+function setProductImage(part) {
+  const img = $("#f-img");
+  const sources = [...new Set([part.image_url, part.image_local, part.image].filter(Boolean))];
+  part.shownImage = "";
+  const showNone = (why) => {
+    img.removeAttribute("src");
+    img.style.display = "none";
+    $("#f-noimg").style.display = "";
+    $("#f-imgnote").textContent = why || "";
+  };
+  const tryNext = (i) => {
+    if (i >= sources.length) {
+      return showNone(sources.length ? "התמונה לא נטענה בדפדפן" : IMAGE_NOTES[part.image_note] || "");
+    }
+    img.onerror = () => tryNext(i + 1);
+    img.onload = () => {
+      part.shownImage = sources[i];
+      img.style.display = "";
+      $("#f-noimg").style.display = "none";
+    };
+    img.src = sources[i];
+  };
+  tryNext(0);
+}
 
 $("#lookup-form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -435,7 +452,7 @@ $("#item-form").addEventListener("submit", async (e) => {
       unit: $("#f-unit").value.trim(),
       tiers,
       unit_price: $("#f-price").value,
-      image: state.part.image || "",
+      image: state.part.shownImage || state.part.image || "",
       quantity: $("#f-qty").value,
       project,
       purpose: $("#f-purpose").value.trim(),

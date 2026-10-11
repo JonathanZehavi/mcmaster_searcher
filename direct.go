@@ -132,10 +132,12 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 	if !ok {
 		return nil, errNotProduct
 	}
+	p.ImageNote = "no-path"
 	if res.Content.Status == 200 {
 		if path := parseImagePath(res.Content.Text); path != "" {
 			p.ImageURL = s.absURL(path)
 			p.ImageFile, _ = s.saveImage(ctx, pn, p.ImageURL)
+			p.ImageNote = imageNote(p)
 		}
 	}
 	s.lastHow = "direct"
@@ -147,13 +149,24 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 // fillImageFromContent adds the image from the page's own ProductContent
 // call, waiting briefly for it to arrive.
 func (s *Scraper) fillImageFromContent(ctx context.Context, rec *netRecorder, p *Part) {
+	p.ImageNote = "no-path"
 	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(150 * time.Millisecond) {
 		if body, _, ok := rec.find(contentPath); ok {
 			if path := parseImagePath(body); path != "" {
 				p.ImageURL = s.absURL(path)
 				p.ImageFile, _ = s.saveImage(ctx, p.PartNumber, p.ImageURL)
+				p.ImageNote = imageNote(p)
 			}
 			return
 		}
 	}
+}
+
+// imageNote says why a part with an image address has no stored copy.
+// The browser can still show it straight from McMaster.
+func imageNote(p *Part) string {
+	if p.ImageFile == "" {
+		return "download-failed"
+	}
+	return ""
 }

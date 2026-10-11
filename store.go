@@ -46,6 +46,7 @@ type Part struct {
 	Unit        string      `json:"unit"`
 	Tiers       []PriceTier `json:"tiers"`
 	ImageURL    string      `json:"image_url"`
+	ImageNote   string      `json:"image_note,omitempty"` // why there is no stored image: no-path | download-failed
 	ImageFile   string      `json:"image_file"`
 	Source      string      `json:"source"`
 	FetchedAt   string      `json:"fetched_at"`
