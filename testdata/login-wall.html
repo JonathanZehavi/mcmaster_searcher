@@ -1,0 +1,16 @@
+<!doctype html><html><head><title>McMaster-Carr</title>
+<meta name="description" content="McMaster-Carr is the complete source for your plant with over 595,000 products. 98% of products ordered ship from stock and deliver same or next day.">
+<script src="/mv123/app.js"></script>
+</head>
+<body><div id="app">Loading…</div>
+<script>
+// Like the real site for a visitor who is not logged in: the page asks the
+// data calls (which answer), but only shows a login prompt.
+const pn = location.pathname.split("/")[1];
+const ev = encodeURIComponent(JSON.stringify([{type:"ORDERINGMASTERPARTNUMBER",selectionType:"SELECTION",values:{entities:pn,preselectedComponentPartNumber:""}}]));
+setTimeout(() => {
+  fetch(`/mv123/WebParts/OrderServer/ProductOrderInfo.aspx?partNumber=${pn}&clientNavigationEvents=${ev}&features=enablemnitpns`);
+  fetch(`/mv123/WebParts/Navigate/ProductContent.aspx?partNumber=${pn}&clientNavigationEvents=${ev}&features=rtrvcadviarps`);
+  document.getElementById("app").innerHTML = "<h1>Log in to view Product Detail</h1>";
+}, 600);
+</script></body></html>

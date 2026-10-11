@@ -192,3 +192,16 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
+
+// find returns the body of a successful recorded request whose URL contains
+// part, and that URL.
+func (r *netRecorder) find(part string) (body, url string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range r.order {
+		if n := r.byID[id]; n.Status == 200 && n.Body != "" && strings.Contains(n.URL, part) {
+			return n.Body, n.URL, true
+		}
+	}
+	return "", "", false
+}

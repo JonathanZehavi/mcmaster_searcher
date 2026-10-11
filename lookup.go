@@ -84,6 +84,15 @@ type Scraper struct {
 
 	siteHost string // "mcmaster.com": requests elsewhere are third-party
 	dietOff  bool   // set if refusing third-party requests ever broke a lookup
+
+	// The fast path (see direct.go): an open McMaster tab from which a lookup
+	// asks the site's data calls directly, and their version segment.
+	apiTab      context.Context
+	apiCancel   func()
+	mv          string
+	infoTmpl    string // the data call URLs as the page last sent them, part number as {PN}
+	contentTmpl string
+	lastHow     string // "direct" or "page": how the last lookup got its data (tests, log)
 }
 
 func NewScraper(dataDir string) *Scraper {
@@ -140,6 +149,13 @@ func (s *Scraper) Lookup(pn string) (*Part, error) {
 		time.Sleep(wait)
 	}
 	defer func() { s.last = time.Now() }()
+	// Fast path first: ask McMaster's data calls from the open tab.
+	if p, err := s.direct(pn); err == nil {
+		return p, nil
+	} else if err != errNoFastPath && err != errNotProduct {
+		log.Printf("lookup %s: direct data call failed (%v); loading the page instead", pn, err)
+		s.closeAPITab()
+	}
 	diet := !s.dietOff
 	p, kind, err := s.lookup(pn, diet)
 	if err != nil && diet && (kind == failLoad || kind == failUnrecognized) {
@@ -155,8 +171,8 @@ func (s *Scraper) Lookup(pn string) (*Part, error) {
 	return p, err
 }
 
-// Warm starts the browser and loads McMaster's home page once, so the first
-// real lookup finds the browser running and the site's scripts cached.
+// Warm starts the browser and opens McMaster's home page in a tab that stays
+// open, so lookups can use the fast path from the very first search.
 func (s *Scraper) Warm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,16 +184,30 @@ func (s *Scraper) Warm() {
 	if err != nil {
 		return
 	}
-	defer cancel()
 	ctx, cancelT := context.WithTimeout(tab, s.Timeout)
 	defer cancelT()
-	_ = chromedp.Run(ctx, navigateNoWait(s.BaseURL+"/"), chromedp.Sleep(3*time.Second))
+	if chromedp.Run(ctx, navigateNoWait(s.BaseURL+"/")) != nil {
+		cancel()
+		return
+	}
+	// The site version segment shows up in the page's own script/data URLs.
+	for end := time.Now().Add(s.Timeout); time.Now().Before(end); time.Sleep(300 * time.Millisecond) {
+		var mv string
+		if chromedp.Run(ctx, chromedp.Evaluate(mvFromPageJS, &mv)) == nil && mv != "" {
+			s.keepAPITab(tab, cancel, mv)
+			log.Printf("warm-up: fast path ready (%s)", mv)
+			return
+		}
+	}
+	cancel()
+	log.Printf("warm-up: no site version found; lookups will load pages")
 }
 
 // Close shuts the browser down (on exit, so no Chrome is left running).
 func (s *Scraper) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeAPITab()
 	if s.stopBrowser != nil {
 		s.stopBrowser()
 		s.browserCtx, s.stopBrowser = nil, nil
@@ -403,7 +433,12 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 		}
 		return nil, failLoad, &LookupError{Msg: "לא הצלחתי לפתוח לשונית בדפדפן: " + firstLine(err.Error())}
 	}
-	defer cancelTab()
+	keepTab := false // a lookup that got its data from the site's calls keeps the tab for the fast path
+	defer func() {
+		if !keepTab {
+			cancelTab()
+		}
+	}()
 	ctx, cancelT := context.WithTimeout(tab, s.Timeout+15*time.Second)
 	defer cancelT()
 	// Note the page's data requests (saved before the tab closes; see recorder.go).
@@ -426,6 +461,24 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 	deadline := time.Now().Add(s.Timeout)
 	var namesSince, lastFull time.Time
 	for time.Now().Before(deadline) {
+		// Best source: the site's own product data call, which answers even
+		// when the page shows "Log in to view Product Detail".
+		if body, u, ok := rec.find(orderInfoPath); ok {
+			if p, ok := parseOrderInfo(body, pn); ok {
+				s.fillImageFromContent(ctx, rec, p)
+				outcome, keepTab, s.lastHow = "ok", true, "page"
+				if m := mvSegmentRe.FindStringSubmatch(u); m != nil {
+					s.keepAPITab(tab, cancelTab, m[1])
+					_, cu, _ := rec.find(contentPath)
+					s.rememberCallForms(pn, u, cu)
+				} else {
+					keepTab = false
+				}
+				log.Printf("lookup %s: product data after %.1fs (from the site's data call); %d price tiers; image=%v",
+					pn, time.Since(t0).Seconds(), len(p.Tiers), p.ImageFile != "")
+				return p, "", nil
+			}
+		}
 		var ready int
 		_ = chromedp.Run(ctx, chromedp.Evaluate(readyJS, &ready))
 		if ready&3 == 3 || ready&4 != 0 || time.Since(lastFull) > 1500*time.Millisecond {
@@ -488,7 +541,7 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 		stats.allowURL(data.Image)
 		p.ImageFile, how = s.saveImage(ctx, pn, data.Image)
 	}
-	outcome = "ok"
+	outcome, s.lastHow = "ok", "page"
 	log.Printf("lookup %s: product shown after %.1fs, done %.1fs; diet=%v blocked=%d %v; image=%s",
 		pn, tShown.Seconds(), time.Since(t0).Seconds(), diet, stats.blocked.Load(), stats.hosts(), how)
 	return p, "", nil

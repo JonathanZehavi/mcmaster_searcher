@@ -16,7 +16,7 @@
   const names = [];
   // McMaster's site-wide marketing text sits in every page's metadata from the
   // first moment; it is never a product name.
-  const boilerplate = /complete source for your plant|ship from stock|deliver same or next day|^mcmaster-carr$|^welcome\b|^sign in\b|^log in\b/i;
+  const boilerplate = /complete source for your plant|ship from stock|deliver same or next day|log in to view|^mcmaster-carr$|^welcome\b|^sign in\b|^log in\b/i;
   const push = (s) => {
     s = clean(s).replace(/\s*\|\s*McMaster-Carr\s*$/i, "").replace(/^McMaster-Carr\s*[-|:]?\s*/i, "");
     if (s && s.length > 3 && s.length < 300 && !boilerplate.test(s) && !names.includes(s)) names.push(s);

@@ -41,10 +41,44 @@ func redPNG() []byte {
 	return buf.Bytes()
 }
 
+// fakeCatalog answers the fake site's ProductOrderInfo call, in the shape the
+// real site uses.
+var fakeCatalog = map[string]string{
+	"7129K21": `{"partNumber":"7129K21","unitOfMeasure":"Pack of 10","parentDescription":"Brass Hex Nut","suffixDescription":"1/4\"-20 Thread Size","pricingData":{"price":"$5.12 per pack of 10","priceLevels":[{"QuantityRangeMessage":"1-9 packs","PriceMessage":"$5.12","SellPrice":5.12},{"QuantityRangeMessage":"10 or more","PriceMessage":"$4.60","SellPrice":4.6}],"shouldShowPrice":true}}`,
+	"7129K22": `{"partNumber":"7129K22","unitOfMeasure":"Each","parentDescription":"Brass Hex Nut","suffixDescription":"5/16\"-18 Thread Size","pricingData":{"price":"$0.88 each","priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$0.88","SellPrice":0.88}],"shouldShowPrice":true}}`,
+}
+
+// pageHits counts product page loads per part number (to prove the fast path skips them).
+var pageHits sync.Map
+
 func fakeMcMaster(t *testing.T) *httptest.Server {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/":
+			http.ServeFile(w, r, "testdata/home.html")
+		case r.URL.Path == "/mv123/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Write([]byte("// site bundle"))
+		case r.URL.Path == "/mv123"+orderInfoPath:
+			body, ok := fakeCatalog[r.URL.Query().Get("partNumber")]
+			if !ok {
+				body = `{"partNumber":"","unitOfMeasure":""}`
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		case r.URL.Path == "/mv123"+contentPath:
+			pn := strings.ToLower(r.URL.Query().Get("partNumber"))
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"displayImage":{"sourcePath":"/mvD/Contents/gfx/ImageCache/712/%s-@100p.png?ver=1","height":100,"width":100}}`, pn)
+		case strings.HasPrefix(r.URL.Path, "/mvD/Contents/gfx/ImageCache/"):
+			w.Header().Set("Content-Type", "image/png")
+			w.Write(redPNG())
+		case strings.HasPrefix(r.URL.Path, "/7129K2"):
+			pn := strings.Trim(r.URL.Path, "/")
+			n, _ := pageHits.LoadOrStore(pn, new(atomic.Int32))
+			n.(*atomic.Int32).Add(1)
+			http.ServeFile(w, r, "testdata/login-wall.html")
 		case strings.HasPrefix(r.URL.Path, "/img/protected"):
 			// Like a site that refuses downloads: only an <img> on the page gets it.
 			if r.Header.Get("Sec-Fetch-Dest") != "image" {
@@ -196,6 +230,83 @@ func TestNetworkDietFallsBack(t *testing.T) {
 	}
 	if !s.dietOff {
 		t.Fatal("diet should be off after it broke a page")
+	}
+}
+
+func hits(pn string) int32 {
+	if n, ok := pageHits.Load(pn); ok {
+		return n.(*atomic.Int32).Load()
+	}
+	return 0
+}
+
+// The real site shows "Log in to view Product Detail" but its data calls still
+// answer: the lookup takes the details from them, keeps the tab, and the next
+// lookup asks the calls directly without loading a page.
+func TestLoginWallUsesDataCallsThenFastPath(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	p, err := s.Lookup("7129K21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PriceTier{{Min: 1, Max: 9, Price: 5.12}, {Min: 10, Max: 0, Price: 4.6}}
+	if p.Name != `Brass Hex Nut, 1/4"-20 Thread Size` || p.Unit != "Pack of 10" || fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
+		t.Fatalf("got %+v", p)
+	}
+	if b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile)); err != nil || !bytes.HasPrefix(b, []byte("\x89PNG")) {
+		t.Fatalf("image not saved: %q %v", p.ImageFile, err)
+	}
+	if s.lastHow != "page" || s.mv != "mv123" || !strings.Contains(s.infoTmpl, "features=enablemnitpns") {
+		t.Fatalf("fast path not prepared: how=%s mv=%q tmpl=%q", s.lastHow, s.mv, s.infoTmpl)
+	}
+
+	p, err = s.Lookup("7129K22")
+	if err != nil || s.lastHow != "direct" || hits("7129K22") != 0 {
+		t.Fatalf("second lookup should skip the page: how=%s hits=%d err=%v", s.lastHow, hits("7129K22"), err)
+	}
+	if p.Unit != "Each" || len(p.Tiers) != 1 || p.Tiers[0] != (PriceTier{Min: 1, Max: 0, Price: 0.88}) || p.ImageFile == "" {
+		t.Fatalf("direct result: %+v", p)
+	}
+
+	// An unknown part number falls back to the page (and fails) but keeps the fast path.
+	if _, err := s.Lookup("1111A11"); err == nil {
+		t.Fatal("unknown part should fail")
+	}
+	if s.apiTab == nil {
+		t.Fatal("an unknown part number must not close the fast path")
+	}
+}
+
+func TestWarmUpEnablesFastPath(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	s.Warm()
+	if s.mv != "mv123" {
+		t.Fatalf("warm-up did not find the site version: %q", s.mv)
+	}
+	before := hits("7129K21")
+	p, err := s.Lookup("7129K21")
+	if err != nil || s.lastHow != "direct" || hits("7129K21") != before {
+		t.Fatalf("first lookup after warm-up should be direct: how=%s err=%v", s.lastHow, err)
+	}
+	if p.Name != `Brass Hex Nut, 1/4"-20 Thread Size` {
+		t.Fatalf("got %+v", p)
+	}
+}
+
+func TestParseRealOrderInfo(t *testing.T) {
+	// The answer the real site gave for 8336N108 (recorded 2026-10-11).
+	body := `{"partNumber":"8336N108","unitOfMeasure":"Pair","parentDescription":"Welding Mitts","suffixDescription":"Cowhide Leather, Size L","deliveryMessage":"Delivers Tuesday","pricingData":{"price":"$28.46 per pair","priceLevelUnitOfMeasureColumnHeader":"Per Pair","priceLevels":[{"QuantityRangeMessage":"1-11 pairs","PriceMessage":"$28.46","SellPrice":28.46},{"QuantityRangeMessage":"12 or more","PriceMessage":"$25.93","SellPrice":25.93}],"shouldShowPrice":true,"shouldShowComponentPrice":false,"isPRUP":false,"perPiecePrice":null},"showProductDetailLinkInd":true}`
+	p, ok := parseOrderInfo(body, "8336N108")
+	want := []PriceTier{{Min: 1, Max: 11, Price: 28.46}, {Min: 12, Max: 0, Price: 25.93}}
+	if !ok || p.Name != "Welding Mitts, Cowhide Leather, Size L" || p.Unit != "Pair" || fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
+		t.Fatalf("got %+v ok=%v", p, ok)
+	}
+	if _, ok := parseOrderInfo(`{"partNumber":"","unitOfMeasure":""}`, "1111A11"); ok {
+		t.Fatal("empty answer must not count as a product")
+	}
+	img := parseImagePath(`{"displayImage":{"id":1,"sourcePath":"/mvD/Contents/gfx/ImageCache/833/8336n108-@100p_oh4yb_1755197483.png?ver=ImageNotFound","height":100,"width":100}}`)
+	if !strings.HasPrefix(img, "/mvD/Contents/gfx/ImageCache/833/8336n108") {
+		t.Fatalf("image path: %q", img)
 	}
 }
 
