@@ -138,7 +138,9 @@ document.querySelectorAll(".tab").forEach((btn) =>
 // ---------- tables ----------
 // Columns: key -> [header, cell renderer]. Editable cells carry data-edit.
 const COLS = {
-  img: ["", (it) => (it.image ? `<img src="${esc(it.image)}" alt="">` : "")],
+  // no-referrer: McMaster serves its product images only when the request
+  // doesn't say it comes from another site.
+  img: ["", (it) => (it.image ? `<img src="${esc(it.image)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : "")],
   pn: ["מק״ט", (it) => `<a dir="ltr" href="https://www.mcmaster.com/${esc(it.part_number)}/" target="_blank" rel="noopener">${esc(it.part_number)}</a>`],
   name: ["תיאור", (it) => `<span dir="ltr">${esc(it.name)}</span>`],
   unit: ["UOM", (it) => `<span dir="ltr">${esc(it.unit)}</span>`],
