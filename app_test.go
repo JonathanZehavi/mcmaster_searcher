@@ -61,8 +61,10 @@ func seenOther(r *http.Request, pn string) bool {
 }
 
 // The 18 hidden part numbers behind 7856K41's choices (from the real answer):
-// 3 lengths x 6 colors. Half answer with the option ids they stand for, half
-// only say it in their description, to cover both ways of matching.
+// 3 lengths x 6 colors. Like the real site (2026-10-16) they answer with the
+// combination in the description ("1, 000 Feet Long, Red") and the price only
+// as text; some also carry option ids, to cover that way of matching too.
+// The first ask for every third one is refused, as right after a fresh session.
 var (
 	heatShrinkComps   = strings.Fields("7856K188 7856K189 7856K199 7856K202 7856K203 7856K311 7856K511 7856K512 7856K514 7856K515 7856K516 7856K517 7856K934 7856K936 7856K937 7856K939 7856K947 7856K94")
 	heatShrinkLengths = [][2]string{{"25", "10000001612988"}, {"100", "10000001613252"}, {"1,000", "10000001604658"}}
@@ -83,9 +85,15 @@ func fakeVariant(pn string) string {
 	if i%2 == 0 {
 		ids = fmt.Sprintf(`["%s","%s"]`, l[1], c[1])
 	}
-	return fmt.Sprintf(`{"partNumber":"%s","unitOfMeasure":"Each","parentDescription":"Heat-Shrink Tubing","suffixDescription":"0.06\" ID Before Shrinking, %s ft. Long, %s","easyToOrderModel":{"implicitlySelectedAttrValueIds":%s,"componentSpecSpecChoices":[],"terminalComponentPartNumbersInScope":[]},"pricingData":{"price":"$%.2f each","priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$%.2f","SellPrice":%.2f}],"shouldShowPrice":true}}`,
-		pn, l[0], c[0], ids, heatShrinkPrice(li, ci), heatShrinkPrice(li, ci), heatShrinkPrice(li, ci))
+	model := "null"
+	if i%4 == 0 {
+		model = fmt.Sprintf(`{"implicitlySelectedAttrValueIds":%s,"componentSpecSpecChoices":[],"terminalComponentPartNumbersInScope":[]}`, ids)
+	}
+	return fmt.Sprintf(`{"partNumber":"%s","unitOfMeasure":"Each","parentDescription":"Heat-Shrink Tubing","suffixDescription":"0.06\" ID Before Shrinking, %s Feet Long, %s","easyToOrderModel":%s,"pricingData":{"price":"$%.2f each","priceLevels":[],"shouldShowPrice":true}}`,
+		pn, strings.Replace(l[0], ",", ", ", 1), c[0], model, heatShrinkPrice(li, ci))
 }
+
+var refusedOnce sync.Map
 
 // pageHits counts product page loads per part number (to prove the fast path skips them).
 var pageHits sync.Map
@@ -115,7 +123,12 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			}
 			w.Write(b)
 		case r.URL.Path == "/mv123"+orderInfoPath && fakeVariant(r.URL.Query().Get("partNumber")) != "":
-			w.Write([]byte(fakeVariant(r.URL.Query().Get("partNumber"))))
+			pn := r.URL.Query().Get("partNumber")
+			if _, seen := refusedOnce.LoadOrStore(pn, true); !seen && slices.Index(heatShrinkComps, pn)%3 == 0 {
+				http.Error(w, "<!-- refused -->", 403)
+				return
+			}
+			w.Write([]byte(fakeVariant(pn)))
 		case r.URL.Path == "/mv123"+orderInfoPath:
 			body, ok := fakeCatalog[r.URL.Query().Get("partNumber")]
 			if !ok {
@@ -398,9 +411,31 @@ func TestContainsWord(t *testing.T) {
 		{"colored", "red", false},
 		{"25 ft. long, red", "red", true},
 		{"0.25 in.", "25", false},
+		{normText(`0.06" id before shrinking, 1, 000 feet long, red`), normText("1,000"), true},
+		{normText(`0.06" id before shrinking, 1, 000 feet long, red`), normText("100"), false},
 	} {
 		if got := containsWord(c.s, c.w); got != c.want {
 			t.Errorf("containsWord(%q, %q) = %v", c.s, c.w, got)
+		}
+	}
+}
+
+// Real answers for two hidden part numbers of 7856K41 (2026-10-16).
+func TestVariantFromRealAnswer(t *testing.T) {
+	body, _ := os.ReadFile("testdata/7856K41-orderinfo.json")
+	master, _ := parseOrderInfo(string(body), "7856K41")
+	for pn, want := range map[string][3]string{
+		"7856K514": {`0.06\" ID Before Shrinking, 1, 000 Feet Long, Red`, "1,000", "Red"},
+		"7856K94":  {`0.06\" ID Before Shrinking, 25 Feet Long, Blue`, "25", "Blue"},
+	} {
+		ans := fmt.Sprintf(`{"partNumber":"%s","unitOfMeasure":"Each","parentDescription":"Heat-Shrink Tubing","suffixDescription":"%s","easyToOrderModel":null,"pricingData":{"price":"$545.94 each","priceLevelUnitOfMeasureColumnHeader":"","priceLevels":[],"shouldShowPrice":true}}`, pn, want[0])
+		cp, ok := parseOrderInfo(ans, pn)
+		if !ok || len(cp.Tiers) != 1 || cp.Tiers[0].Price != 545.94 {
+			t.Fatalf("%s: %+v", pn, cp)
+		}
+		vals, ok := variantValues(master.Choices, cp)
+		if !ok || vals["Length"] != want[1] || vals["Color"] != want[2] {
+			t.Fatalf("%s: got %v ok=%v", pn, vals, ok)
 		}
 	}
 }

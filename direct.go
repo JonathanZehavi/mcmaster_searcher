@@ -195,7 +195,7 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 	return p, nil
 }
 
-// manyJS asks the product data call for several part numbers, six at a time.
+// manyJS asks the product data call for several part numbers, four at a time.
 // %s: the URLs (a JSON array).
 const manyJS = `(async (urls) => {
 	const out = new Array(urls.length);
@@ -209,7 +209,7 @@ const manyJS = `(async (urls) => {
 			} catch (e) { out[i] = { status: 0, text: String(e) }; }
 		}
 	};
-	await Promise.all(Array.from({ length: Math.min(6, urls.length) }, worker));
+	await Promise.all(Array.from({ length: Math.min(4, urls.length) }, worker));
 	return out;
 })(%s)`
 
@@ -232,17 +232,45 @@ func (s *Scraper) fillVariants(p *Part) {
 	for i, c := range comps {
 		urls[i], _ = s.callURLs(c)
 	}
-	ctx, cancel := context.WithTimeout(s.apiTab, 20*time.Second)
+	ctx, cancel := context.WithTimeout(s.apiTab, 30*time.Second)
 	defer cancel()
-	var res []struct {
+	type answer struct {
 		Status int
 		Text   string
 	}
-	b, _ := json.Marshal(urls)
-	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(manyJS, b), &res,
-		func(e *runtime.EvaluateParams) *runtime.EvaluateParams { return e.WithAwaitPromise(true) })); err != nil {
-		log.Printf("lookup %s: pricing the combinations failed: %v", p.PartNumber, err)
-		return
+	res := make([]answer, len(urls))
+	// Answers refused with 403 are asked again after a pause: right after a
+	// fresh session McMaster refuses calls for a moment (seen 2026-10-16:
+	// 8 of 18 refused, all fine a moment later).
+	todo := make([]int, len(urls))
+	for i := range todo {
+		todo[i] = i
+	}
+	for round := 0; round < 3 && len(todo) > 0; round++ {
+		if round > 0 {
+			time.Sleep(time.Duration(round) * 1500 * time.Millisecond)
+		}
+		ask := make([]string, len(todo))
+		for j, i := range todo {
+			ask[j] = urls[i]
+		}
+		var got []answer
+		b, _ := json.Marshal(ask)
+		if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(manyJS, b), &got,
+			func(e *runtime.EvaluateParams) *runtime.EvaluateParams { return e.WithAwaitPromise(true) })); err != nil {
+			log.Printf("lookup %s: pricing the combinations failed: %v", p.PartNumber, err)
+			break
+		}
+		var again []int
+		for j, i := range todo {
+			if j < len(got) {
+				res[i] = got[j]
+			}
+			if res[i].Status == 403 || res[i].Status == 0 {
+				again = append(again, i)
+			}
+		}
+		todo = again
 	}
 	var entries []*netEntry
 	unclear := 0

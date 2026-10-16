@@ -321,7 +321,11 @@ function applyChoices() {
       note.innerHTML = `מק״ט פנימי של הבחירה ב-McMaster: <b dir="ltr">${esc(state.variant.part_number)}</b>`;
       note.className = "choice-note ok";
     } else {
-      note.textContent = "לא מצאתי מחיר לשילוב הזה – הזן מחיר ליחידה ידנית.";
+      // Fewer priced combinations than possible: some answers were missing at lookup time.
+      const possible = p.choices.filter((c) => !c.free).reduce((n, c) => n * c.options.length, 1);
+      note.textContent = (p.variants || []).length < possible
+        ? "המחיר לשילוב הזה לא נטען מ-McMaster – לחץ ↻ רענן פרטים, או הזן מחיר ליחידה ידנית."
+        : "לא מצאתי מחיר לשילוב הזה – הזן מחיר ליחידה ידנית.";
       note.className = "choice-note warn";
     }
     document.querySelectorAll("#f-choices .opt").forEach((b) => {

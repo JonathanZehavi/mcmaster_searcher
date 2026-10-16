@@ -270,7 +270,13 @@ func variantValues(choices []Choice, comp *Part) (map[string]string, bool) {
 	return vals, true
 }
 
-func normText(s string) string { return strings.ToLower(strings.ReplaceAll(s, ",", "")) }
+// normText lowercases and joins thousands: "1,000", "1, 000" (as McMaster
+// writes it in descriptions: "1, 000 Feet Long") and "1000" all become "1000".
+func normText(s string) string {
+	return strings.ToLower(strings.ReplaceAll(thousandsRe.ReplaceAllString(s, "$1$2"), ",", ""))
+}
+
+var thousandsRe = regexp.MustCompile(`(\d), ?(\d{3})\b`)
 
 // containsWord: w appears in s not as part of a longer number or word
 // ("100" is not in "1000" or "1.100", "red" is not in "colored").
