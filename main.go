@@ -193,7 +193,10 @@ func main() {
 		openBrowser(localURL)
 	}
 	if os.Getenv("MCM_NO_WARMUP") != "1" {
-		go scraper.Warm()
+		go func() {
+			scraper.Warm()
+			scraper.KeepWarm(8 * time.Minute)
+		}()
 	}
 	if err := http.Serve(ln, srv); err != nil {
 		fail("server stopped: " + err.Error())

@@ -20,6 +20,7 @@ import (
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
@@ -159,8 +160,15 @@ func (s *Scraper) lookupAny(pn string) (*Part, error) {
 	case err == nil:
 		return p, nil
 	case err == errWall:
-		log.Printf("lookup %s: McMaster's login wall on the data call; starting a fresh session", pn)
+		// The session expired or was refused: a new visitor, warmed until
+		// McMaster answers, is usually faster than a full page load.
+		log.Printf("lookup %s: McMaster refused the data call; starting a fresh session", pn)
 		s.resetSession()
+		if s.warm() {
+			if p, err := s.direct(pn); err == nil {
+				return p, nil
+			}
+		}
 	case err == errIncomplete:
 		log.Printf("lookup %s: the data call left out the price and choices; loading the page", pn)
 	case err != errNoFastPath && err != errNotProduct:
@@ -193,35 +201,131 @@ func (s *Scraper) lookupAny(pn string) (*Part, error) {
 }
 
 // Warm starts the browser and opens McMaster's home page in a tab that stays
-// open, so lookups can use the fast path from the very first search.
+// open, so lookups can use the fast path from the very first search. If the
+// session is refused, it starts over once as a new visitor.
 func (s *Scraper) Warm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.warm() {
+		s.resetSession()
+		s.warm()
+	}
+}
+
+// warm opens the fast-path tab and waits until McMaster actually answers the
+// data call from it. Finding the site version is not enough: McMaster
+// authorizes a new visitor a few seconds after the page starts loading, and
+// until then refuses the calls (403), which made the first search after a
+// restart fall back to slow page loads.
+func (s *Scraper) warm() bool {
 	if err := s.ensureBrowser(); err != nil {
 		log.Printf("browser warm-up: %v", err)
-		return
+		return false
 	}
 	tab, cancel, _, err := s.openTab(!s.dietOff)
 	if err != nil {
-		return
+		return false
 	}
+	t0 := time.Now()
 	ctx, cancelT := context.WithTimeout(tab, s.Timeout)
 	defer cancelT()
 	if chromedp.Run(ctx, navigateNoWait(s.BaseURL+"/")) != nil {
 		cancel()
-		return
+		return false
 	}
 	// The site version segment shows up in the page's own script/data URLs.
 	for end := time.Now().Add(s.Timeout); time.Now().Before(end); time.Sleep(300 * time.Millisecond) {
 		var mv string
 		if chromedp.Run(ctx, chromedp.Evaluate(mvFromPageJS, &mv)) == nil && mv != "" {
 			s.keepAPITab(tab, cancel, mv)
-			log.Printf("warm-up: fast path ready (%s)", mv)
-			return
+			break
 		}
 	}
-	cancel()
-	log.Printf("warm-up: no site version found; lookups will load pages")
+	if s.apiTab != tab {
+		cancel()
+		log.Printf("warm-up: no site version found; lookups will load pages")
+		return false
+	}
+	status := 0
+	for end := time.Now().Add(15 * time.Second); time.Now().Before(end); time.Sleep(time.Second) {
+		if status = s.probe(); status == 200 {
+			log.Printf("warm-up: fast path ready (%s) after %.1fs", s.mv, time.Since(t0).Seconds())
+			return true
+		}
+	}
+	log.Printf("warm-up: McMaster keeps refusing the data call (status %d)", status)
+	s.closeAPITab()
+	return false
+}
+
+// probePN is any real part number; asking for it tells whether McMaster
+// still answers this session's data calls.
+const probePN = "91251A540"
+
+// probe asks the data call once from the fast-path tab and returns the HTTP
+// status (0 if it could not ask).
+func (s *Scraper) probe() int {
+	if s.apiTab == nil || s.apiTab.Err() != nil || s.mv == "" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(s.apiTab, 10*time.Second)
+	defer cancel()
+	info, content := s.callURLs(probePN)
+	var res struct{ Info struct{ Status int } }
+	if chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(directJS, jsString(info), jsString(content)), &res,
+		func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })) != nil {
+		return 0
+	}
+	return res.Info.Status
+}
+
+// KeepWarm checks the session now and then while nobody is searching (work
+// hours only) and renews it when McMaster stopped answering, so the next
+// search finds a working fast path instead of paying for the recovery.
+// MCM_KEEPWARM=0 turns it off, =always ignores the hours.
+func (s *Scraper) KeepWarm(every time.Duration) {
+	mode := os.Getenv("MCM_KEEPWARM")
+	if mode == "0" {
+		return
+	}
+	for range time.Tick(every) {
+		if mode != "always" && !workHours(time.Now()) {
+			continue
+		}
+		s.mu.Lock()
+		if time.Since(s.last) >= every {
+			s.refreshSession()
+		}
+		s.mu.Unlock()
+	}
+}
+
+// refreshSession renews the session if McMaster refuses its data calls.
+func (s *Scraper) refreshSession() {
+	st := s.probe()
+	if st == 200 {
+		return
+	}
+	log.Printf("keep-warm: data call answered %d; renewing the McMaster session", st)
+	s.resetSession()
+	if !s.warm() {
+		s.resetSession()
+		s.warm()
+	}
+}
+
+// workHours: Sunday to Thursday 6:00-20:00, Friday 6:00-14:00 (server time;
+// render.yaml sets Asia/Jerusalem).
+func workHours(t time.Time) bool {
+	h := t.Hour()
+	switch t.Weekday() {
+	case time.Saturday:
+		return false
+	case time.Friday:
+		return h >= 6 && h < 14
+	default:
+		return h >= 6 && h < 20
+	}
 }
 
 // resetSession makes the next request come from a new anonymous visitor: the

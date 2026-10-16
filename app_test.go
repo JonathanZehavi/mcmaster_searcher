@@ -95,6 +95,21 @@ func fakeVariant(pn string) string {
 
 var refusedOnce sync.Map
 
+// visitors numbers the fake site's sessions; expired lists refused ones.
+var (
+	visitors atomic.Int32
+	expired  sync.Map
+)
+
+func expiredVisitor(r *http.Request) bool {
+	c, err := r.Cookie("visitor")
+	if err != nil {
+		return false
+	}
+	_, gone := expired.Load(c.Value)
+	return gone
+}
+
 // pageHits counts product page loads per part number (to prove the fast path skips them).
 var pageHits sync.Map
 
@@ -103,7 +118,13 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/":
+			// Each new visitor gets a session number; an "expired" one is refused.
+			if _, err := r.Cookie("visitor"); err != nil {
+				http.SetCookie(w, &http.Cookie{Name: "visitor", Value: fmt.Sprint(visitors.Add(1)), Path: "/"})
+			}
 			http.ServeFile(w, r, "testdata/home.html")
+		case r.URL.Path == "/mv123"+orderInfoPath && expiredVisitor(r):
+			http.Error(w, "<!-- refused -->", 403)
 		case r.URL.Path == "/mv123/app.js":
 			w.Header().Set("Content-Type", "text/javascript")
 			w.Write([]byte("// site bundle"))
@@ -461,6 +482,41 @@ func TestChoicesArePricedPerCombination(t *testing.T) {
 	}
 	if rec, _ := filepath.Glob(filepath.Join(s.DebugDir, "7856K41-*-network.json")); len(rec) < 2 {
 		t.Fatalf("the combinations' answers should be saved for the debug files: %v", rec)
+	}
+}
+
+// When McMaster stops answering an idle session, the background check
+// renews it, so the next search is fast again.
+func TestKeepWarmRenewsRefusedSession(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	s.Warm()
+	if s.probe() != 200 {
+		t.Fatal("warm-up should leave a working session")
+	}
+	expired.Store(fmt.Sprint(visitors.Load()), true) // the session McMaster stops answering
+	if s.probe() != 403 {
+		t.Fatal("the expired session should be refused")
+	}
+	s.mu.Lock()
+	s.refreshSession()
+	s.mu.Unlock()
+	if s.probe() != 200 {
+		t.Fatal("the session was not renewed")
+	}
+	if _, err := s.Lookup("7129K22"); err != nil || s.lastHow != "direct" {
+		t.Fatalf("after renewal the search should take the fast path: how=%s err=%v", s.lastHow, err)
+	}
+}
+
+func TestWorkHours(t *testing.T) {
+	at := func(day, hour int) time.Time { return time.Date(2026, 10, 11+day, hour, 0, 0, 0, time.Local) } // 2026-10-11 is a Sunday
+	for _, c := range []struct {
+		day, hour int
+		want      bool
+	}{{0, 9, true}, {4, 19, true}, {4, 21, false}, {5, 10, true}, {5, 15, false}, {6, 10, false}, {1, 5, false}} {
+		if got := workHours(at(c.day, c.hour)); got != c.want {
+			t.Errorf("day %d %d:00 = %v", c.day, c.hour, got)
+		}
 	}
 }
 
