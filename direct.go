@@ -172,3 +172,78 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 		pn, time.Since(t0).Seconds(), len(p.Tiers))
 	return p, nil
 }
+
+// manyJS asks the product data call for several part numbers, six at a time.
+// %s: the URLs (a JSON array).
+const manyJS = `(async (urls) => {
+	const out = new Array(urls.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < urls.length) {
+			const i = next++;
+			try {
+				const r = await fetch(urls[i], { credentials: "include" });
+				out[i] = { status: r.status, text: await r.text() };
+			} catch (e) { out[i] = { status: 0, text: String(e) }; }
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(6, urls.length) }, worker));
+	return out;
+})(%s)`
+
+// maxVariants caps how many hidden part numbers one lookup asks about.
+const maxVariants = 60
+
+// fillVariants prices every combination of a product's choices: it asks the
+// data call for each hidden part number behind them (from the open tab) and
+// works out which options each one stands for.
+func (s *Scraper) fillVariants(p *Part) {
+	comps := p.components
+	if len(p.Choices) == 0 || len(comps) > maxVariants || s.apiTab == nil || s.apiTab.Err() != nil || s.mv == "" {
+		if len(comps) > maxVariants {
+			log.Printf("lookup %s: %d combinations, too many to price; choices only", p.PartNumber, len(comps))
+		}
+		return
+	}
+	t0 := time.Now()
+	urls := make([]string, len(comps))
+	for i, c := range comps {
+		urls[i], _ = s.callURLs(c)
+	}
+	ctx, cancel := context.WithTimeout(s.apiTab, 20*time.Second)
+	defer cancel()
+	var res []struct {
+		Status int
+		Text   string
+	}
+	b, _ := json.Marshal(urls)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(manyJS, b), &res,
+		func(e *runtime.EvaluateParams) *runtime.EvaluateParams { return e.WithAwaitPromise(true) })); err != nil {
+		log.Printf("lookup %s: pricing the combinations failed: %v", p.PartNumber, err)
+		return
+	}
+	var entries []*netEntry
+	unclear := 0
+	for i, r := range res {
+		if i >= len(comps) {
+			break
+		}
+		entries = append(entries, &netEntry{URL: urls[i], Method: "GET", Type: "Fetch", Status: int64(r.Status),
+			Size: len(r.Text), HasPart: strings.Contains(strings.ToUpper(r.Text), comps[i]),
+			Body: truncate(r.Text, recMaxBody), Truncated: len(r.Text) > recMaxBody, At: "variant"})
+		cp, ok := parseOrderInfo(r.Text, comps[i])
+		if r.Status != 200 || !ok {
+			unclear++
+			continue
+		}
+		vals, ok := variantValues(p.Choices, cp)
+		if !ok {
+			unclear++
+			continue
+		}
+		p.Variants = append(p.Variants, Variant{PartNumber: comps[i], Values: vals, Name: cp.Name, Unit: cp.Unit, Tiers: cp.Tiers})
+	}
+	writeRecording(s.DebugDir, p.PartNumber, "(combinations)", fmt.Sprintf("%d priced, %d unclear", len(p.Variants), unclear), entries)
+	log.Printf("lookup %s: %d choices, %d combinations priced (%d unclear) in %.2fs",
+		p.PartNumber, len(p.Choices), len(p.Variants), unclear, time.Since(t0).Seconds())
+}

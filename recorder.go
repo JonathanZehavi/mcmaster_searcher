@@ -167,7 +167,14 @@ func writeRecording(dir, pn, pageURL, outcome string, entries []*netEntry) strin
 	if err != nil {
 		return ""
 	}
-	name := fmt.Sprintf("%s-%s%s", pn, time.Now().Format("20060102-150405"), recFileSuffix)
+	stamp := time.Now().Format("20060102-150405")
+	name := fmt.Sprintf("%s-%s%s", pn, stamp, recFileSuffix)
+	for n := 2; ; n++ { // two recordings in the same second keep both
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			break
+		}
+		name = fmt.Sprintf("%s-%s-%d%s", pn, stamp, n, recFileSuffix)
+	}
 	if os.WriteFile(filepath.Join(dir, name), b, 0o644) != nil {
 		return ""
 	}

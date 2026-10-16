@@ -50,6 +50,51 @@ type Part struct {
 	ImageFile   string      `json:"image_file"`
 	Source      string      `json:"source"`
 	FetchedAt   string      `json:"fetched_at"`
+	// Choices made on this part number (length, color …) and the price of
+	// each combination; empty for a plain product.
+	Choices  []Choice  `json:"choices,omitempty"`
+	Variants []Variant `json:"variants,omitempty"`
+
+	components  []string          // hidden part numbers behind the choices (lookup only)
+	implicitIDs []string          // option ids a hidden part number stands for
+	selected    map[string]string // choice name -> option marked selected in the answer
+}
+
+// Choice is one "Choose a …" on a product page. Free: typed in, no list.
+type Choice struct {
+	Name    string         `json:"name"`  // "Length"
+	Label   string         `json:"label"` // "Choose a Length, ft."
+	Options []ChoiceOption `json:"options,omitempty"`
+	Free    bool           `json:"free,omitempty"`
+}
+
+type ChoiceOption struct {
+	Text string   `json:"text"`
+	IDs  []string `json:"ids,omitempty"`
+}
+
+// Variant is one combination of choices: its hidden part number and price.
+type Variant struct {
+	PartNumber string            `json:"part_number"`
+	Values     map[string]string `json:"values"`
+	Name       string            `json:"name"`
+	Unit       string            `json:"unit"`
+	Tiers      []PriceTier       `json:"tiers"`
+}
+
+// Selection is the option picked for one choice on an order line.
+type Selection struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// selectionText: "Length: 100 · Color: Black".
+func selectionText(sel []Selection) string {
+	parts := make([]string, 0, len(sel))
+	for _, x := range sel {
+		parts = append(parts, x.Name+": "+x.Value)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // Item is one line on the order list.
@@ -67,7 +112,9 @@ type Item struct {
 	Requester  string      `json:"requester"`
 	Project    string      `json:"project"`
 	Purpose    string      `json:"purpose"`
-	Status     string      `json:"status"` // open | ordered
+	Selections []Selection `json:"selections,omitempty"` // options chosen on this part number
+	VariantPN  string      `json:"variant_pn,omitempty"` // McMaster's hidden part number for them
+	Status     string      `json:"status"`               // open | ordered
 	CreatedAt  string      `json:"created_at"`
 	OrderID    int         `json:"order_id"`
 }

@@ -241,3 +241,16 @@ code { background: var(--surface-2); border: 1px solid var(--line); padding: 1px
   .search-bar input { font-size: 18px; }
   .kbd-hint { display: none; }
 }
+
+/* choices on one part number (length, color …) */
+.choices { display: flex; flex-direction: column; gap: 12px; margin: 4px 0 14px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2, #fafafa); }
+.choice-label { font-weight: 600; margin-bottom: 6px; text-align: left; }
+.choice-opts { display: flex; flex-wrap: wrap; gap: 6px; direction: ltr; }
+.opt { padding: 6px 12px; border: 1px solid var(--line-strong, #ccc); border-radius: 999px; background: #fff; cursor: pointer; font: inherit; }
+.opt:hover { border-color: var(--accent, #2b6cb0); }
+.opt.active { background: var(--accent, #2b6cb0); border-color: var(--accent, #2b6cb0); color: #fff; }
+.choice-input { width: 100%; max-width: 240px; }
+.choice-note { margin: 0; font-size: 0.9em; color: var(--muted, #666); }
+.choice-note.ok { color: #276749; }
+.choice-note.warn { color: #b7791f; }
+td .sel { font-size: 0.85em; color: var(--muted, #666); margin-top: 2px; }

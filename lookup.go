@@ -20,7 +20,6 @@ import (
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -77,8 +76,9 @@ type Scraper struct {
 	stopBrowser func()
 	userAgent   string
 
-	siteHost string // "mcmaster.com": requests elsewhere are third-party
-	dietOff  bool   // set if refusing third-party requests ever broke a lookup
+	siteHost     string // "mcmaster.com": requests elsewhere are third-party
+	freshProfile string // empty profile used after a session reset (see resetSession)
+	dietOff      bool   // set if refusing third-party requests ever broke a lookup
 
 	// The fast path (see direct.go): an open McMaster tab from which a lookup
 	// asks the site's data calls directly, and their version segment.
@@ -144,6 +144,15 @@ func (s *Scraper) Lookup(pn string) (*Part, error) {
 		time.Sleep(wait)
 	}
 	defer func() { s.last = time.Now() }()
+	p, err := s.lookupAny(pn)
+	if err == nil && len(p.components) > 0 {
+		s.fillVariants(p)
+	}
+	return p, err
+}
+
+// lookupAny gets the product details: the fast path when it can, else the page.
+func (s *Scraper) lookupAny(pn string) (*Part, error) {
 	// Fast path first: ask McMaster's data calls from the open tab.
 	p, err := s.direct(pn)
 	switch {
@@ -213,26 +222,19 @@ func (s *Scraper) Warm() {
 	log.Printf("warm-up: no site version found; lookups will load pages")
 }
 
-// resetSession forgets McMaster's cookies and stored data, so the next request
-// comes from a new anonymous visitor. If that fails, the browser restarts.
+// resetSession makes the next request come from a new anonymous visitor: the
+// browser restarts with an empty profile (no cookies, storage or cache from
+// any McMaster address). Clearing cookies alone was not always enough.
 func (s *Scraper) resetSession() {
 	s.closeAPITab()
-	if s.browserCtx == nil || s.browserCtx.Err() != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(s.browserCtx, 5*time.Second)
-	defer cancel()
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
-		if err := network.ClearBrowserCookies().Do(c); err != nil {
-			return err
-		}
-		return storage.ClearDataForOrigin(s.BaseURL, "all").Do(c)
-	}))
-	if err != nil {
-		log.Printf("could not clear McMaster's cookies (%v); restarting the browser", err)
+	if s.stopBrowser != nil {
 		s.stopBrowser()
-		s.browserCtx, s.stopBrowser = nil, nil
 	}
+	s.browserCtx, s.stopBrowser = nil, nil
+	if s.freshProfile != "" {
+		os.RemoveAll(s.freshProfile)
+	}
+	s.freshProfile, _ = os.MkdirTemp(filepath.Dir(s.ProfileDir), "browser-fresh-")
 }
 
 // Close shuts the browser down (on exit, so no Chrome is left running).
@@ -243,6 +245,9 @@ func (s *Scraper) Close() {
 	if s.stopBrowser != nil {
 		s.stopBrowser()
 		s.browserCtx, s.stopBrowser = nil, nil
+	}
+	if s.freshProfile != "" {
+		os.RemoveAll(s.freshProfile)
 	}
 }
 
@@ -296,7 +301,11 @@ func (s *Scraper) ensureBrowser() error {
 		s.stopBrowser = func() { cancelB(); cancelAlloc() }
 		return nil
 	}
-	err := try(s.ProfileDir)
+	profile := s.ProfileDir
+	if s.freshProfile != "" {
+		profile = s.freshProfile
+	}
+	err := try(profile)
 	if err != nil {
 		// The saved profile can be locked by a Chrome left over from a crash;
 		// a throwaway profile still works (only cookies are lost).

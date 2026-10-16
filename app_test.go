@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,33 @@ func seenOther(r *http.Request, pn string) bool {
 	return err == nil && c.Value != pn
 }
 
+// The 18 hidden part numbers behind 7856K41's choices (from the real answer):
+// 3 lengths x 6 colors. Half answer with the option ids they stand for, half
+// only say it in their description, to cover both ways of matching.
+var (
+	heatShrinkComps   = strings.Fields("7856K188 7856K189 7856K199 7856K202 7856K203 7856K311 7856K511 7856K512 7856K514 7856K515 7856K516 7856K517 7856K934 7856K936 7856K937 7856K939 7856K947 7856K94")
+	heatShrinkLengths = [][2]string{{"25", "10000001612988"}, {"100", "10000001613252"}, {"1,000", "10000001604658"}}
+	heatShrinkColors  = [][2]string{{"Black", "10000001549922"}, {"Blue", "10000001527696"}, {"Green", "10000001523318"},
+		{"Red", "10000001522000"}, {"White", "10000001536223"}, {"Yellow", "10000001536684"}}
+)
+
+func heatShrinkPrice(li, ci int) float64 { return []float64{10, 30, 250}[li] + float64(ci) }
+
+func fakeVariant(pn string) string {
+	i := slices.Index(heatShrinkComps, pn)
+	if i < 0 {
+		return ""
+	}
+	li, ci := i/6, i%6
+	l, c := heatShrinkLengths[li], heatShrinkColors[ci]
+	ids := "[]"
+	if i%2 == 0 {
+		ids = fmt.Sprintf(`["%s","%s"]`, l[1], c[1])
+	}
+	return fmt.Sprintf(`{"partNumber":"%s","unitOfMeasure":"Each","parentDescription":"Heat-Shrink Tubing","suffixDescription":"0.06\" ID Before Shrinking, %s ft. Long, %s","easyToOrderModel":{"implicitlySelectedAttrValueIds":%s,"componentSpecSpecChoices":[],"terminalComponentPartNumbersInScope":[]},"pricingData":{"price":"$%.2f each","priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$%.2f","SellPrice":%.2f}],"shouldShowPrice":true}}`,
+		pn, l[0], c[0], ids, heatShrinkPrice(li, ci), heatShrinkPrice(li, ci), heatShrinkPrice(li, ci))
+}
+
 // pageHits counts product page loads per part number (to prove the fast path skips them).
 var pageHits sync.Map
 
@@ -75,6 +103,10 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			// The session already used up its views: McMaster's hard wall.
 			w.Header().Set("Content-Type", "text/html")
 			w.Write([]byte(wallHTML))
+		case r.URL.Path == "/mv123"+orderInfoPath && r.URL.Query().Get("partNumber") == "7856K41":
+			http.ServeFile(w, r, "testdata/7856K41-orderinfo.json") // recorded from the real site
+		case r.URL.Path == "/mv123"+orderInfoPath && fakeVariant(r.URL.Query().Get("partNumber")) != "":
+			w.Write([]byte(fakeVariant(r.URL.Query().Get("partNumber"))))
 		case r.URL.Path == "/mv123"+orderInfoPath:
 			body, ok := fakeCatalog[r.URL.Query().Get("partNumber")]
 			if !ok {
@@ -320,6 +352,71 @@ func TestPersistentLoginWallFailsClearly(t *testing.T) {
 	}
 	if d := time.Since(t0); d > 6*time.Second {
 		t.Fatalf("took %v: the wall should be recognized at once", d)
+	}
+}
+
+// The real answer for 7856K41: two choices (length, color), no price yet,
+// and 18 hidden part numbers.
+func TestParseChoices(t *testing.T) {
+	body, _ := os.ReadFile("testdata/7856K41-orderinfo.json")
+	p, ok := parseOrderInfo(string(body), "7856K41")
+	if !ok || p.Name != `Heat-Shrink Tubing, 0.06" ID Before Shrinking` || len(p.Tiers) != 0 {
+		t.Fatalf("got %+v ok=%v", p, ok)
+	}
+	if len(p.Choices) != 2 || p.Choices[0].Name != "Length" || p.Choices[0].Label != "Choose a Length, ft." ||
+		len(p.Choices[0].Options) != 3 || p.Choices[0].Options[2].Text != "1,000" ||
+		p.Choices[1].Name != "Color" || len(p.Choices[1].Options) != 6 || p.Choices[1].Options[5].Text != "Yellow" {
+		t.Fatalf("choices: %+v", p.Choices)
+	}
+	if len(p.components) != 18 || p.components[17] != "7856K94" {
+		t.Fatalf("hidden part numbers: %v", p.components)
+	}
+	// A plain product has no choices.
+	plain, _ := parseOrderInfo(fakeCatalog["7129K22"], "7129K22")
+	if len(plain.Choices) != 0 || len(plain.components) != 0 {
+		t.Fatalf("plain product got choices: %+v", plain)
+	}
+}
+
+func TestContainsWord(t *testing.T) {
+	for _, c := range []struct {
+		s, w string
+		want bool
+	}{
+		{"100 ft. long, black", "100", true},
+		{"1000 ft. long, black", "100", false},
+		{"0.100 in. thick", "100", false},
+		{"colored", "red", false},
+		{"25 ft. long, red", "red", true},
+		{"0.25 in.", "25", false},
+	} {
+		if got := containsWord(c.s, c.w); got != c.want {
+			t.Errorf("containsWord(%q, %q) = %v", c.s, c.w, got)
+		}
+	}
+}
+
+// A product with choices: every combination gets its hidden part number and
+// price, through the fast path, in one lookup.
+func TestChoicesArePricedPerCombination(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	s.Warm()
+	p, err := s.Lookup("7856K41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Choices) != 2 || len(p.Variants) != 18 {
+		t.Fatalf("want 2 choices and 18 priced combinations, got %d / %d", len(p.Choices), len(p.Variants))
+	}
+	for _, v := range p.Variants {
+		li := slices.IndexFunc(heatShrinkLengths, func(x [2]string) bool { return x[0] == v.Values["Length"] })
+		ci := slices.IndexFunc(heatShrinkColors, func(x [2]string) bool { return x[0] == v.Values["Color"] })
+		if li < 0 || ci < 0 || heatShrinkComps[li*6+ci] != v.PartNumber || v.Tiers[0].Price != heatShrinkPrice(li, ci) {
+			t.Fatalf("wrong combination: %+v", v)
+		}
+	}
+	if rec, _ := filepath.Glob(filepath.Join(s.DebugDir, "7856K41-*-network.json")); len(rec) < 2 {
+		t.Fatalf("the combinations' answers should be saved for the debug files: %v", rec)
 	}
 }
 
@@ -894,5 +991,71 @@ func TestManagerFromEnvironment(t *testing.T) {
 	t.Setenv("MCM_ADMIN_PASSWORD", "x")
 	if ensureAdminFromEnv(store) == nil {
 		t.Fatal("a too-short password must be refused")
+	}
+}
+
+// A line for a product with choices needs every choice made; it then gets
+// the combination's price, unit and hidden part number, and the Excel file
+// shows the choices in the description.
+func TestAddItemWithChoices(t *testing.T) {
+	sc := &stubScraper{parts: map[string]*Part{"7856K41": {
+		PartNumber: "7856K41", Name: "Heat-Shrink Tubing", Unit: "Each", Source: "auto",
+		Choices: []Choice{
+			{Name: "Length", Label: "Choose a Length, ft.", Options: []ChoiceOption{{Text: "25"}, {Text: "100"}}},
+			{Name: "Color", Label: "Choose a Color", Options: []ChoiceOption{{Text: "Black"}, {Text: "Red"}}},
+		},
+		Variants: []Variant{
+			{PartNumber: "7856K188", Values: map[string]string{"Length": "25", "Color": "Black"}, Unit: "Each", Tiers: []PriceTier{{1, 0, 10}}},
+			{PartNumber: "7856K311", Values: map[string]string{"Length": "100", "Color": "Red"}, Unit: "Each", Tiers: []PriceTier{{1, 0, 33.5}}},
+		},
+	}}}
+	_, admin, dana, _ := world(t, sc)
+	look := dana.mustOK("GET", "/api/lookup?pn=7856K41", nil)
+	if part := look["part"].(map[string]any); len(part["choices"].([]any)) != 2 || len(part["variants"].([]any)) != 2 {
+		t.Fatalf("lookup should send choices and combinations: %v", part)
+	}
+	base := map[string]any{"part_number": "7856K41", "name": "Heat-Shrink Tubing", "quantity": 2, "project": "CWC"}
+	with := func(sel ...string) map[string]any {
+		m := map[string]any{}
+		for k, v := range base {
+			m[k] = v
+		}
+		var list []map[string]string
+		for i := 0; i+1 < len(sel); i += 2 {
+			list = append(list, map[string]string{"name": sel[i], "value": sel[i+1]})
+		}
+		m["selections"] = list
+		return m
+	}
+	if code, out := dana.do("POST", "/api/items", with("Length", "100")); code != 400 || !strings.Contains(out["error"].(string), "Color") {
+		t.Fatalf("a missing choice must be refused: %d %v", code, out)
+	}
+	if code, _ := dana.do("POST", "/api/items", with("Length", "100", "Color", "Purple")); code != 400 {
+		t.Fatal("an option the product does not have must be refused")
+	}
+	it := dana.mustOK("POST", "/api/items", with("Color", "Red", "Length", "100"))["item"].(map[string]any)
+	if it["variant_pn"] != "7856K311" || it["unit_price"] != 33.5 || it["total"] != 67.0 {
+		t.Fatalf("priced by the wrong combination: %v", it)
+	}
+	if sel := it["selections"].([]any); len(sel) != 2 || sel[0].(map[string]any)["name"] != "Length" {
+		t.Fatalf("selections should follow the product's order: %v", sel)
+	}
+	// The cached part keeps its choices after the line is added.
+	if look := dana.mustOK("GET", "/api/lookup?pn=7856K41", nil); len(look["part"].(map[string]any)["choices"].([]any)) != 2 {
+		t.Fatal("adding a line must not drop the part's choices")
+	}
+
+	resp, err := admin.hc.Get(admin.base + "/api/export.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	f, err := excelize.OpenReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc, _ := f.GetCellValue("McMaster", "D2")
+	if desc != "Heat-Shrink Tubing — Length: 100 · Color: Red" {
+		t.Fatalf("Excel description: %q", desc)
 	}
 }

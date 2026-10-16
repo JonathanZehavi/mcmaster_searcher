@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,6 +128,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 func manualURL(pn string) string { return "https://www.mcmaster.com/" + pn + "/" }
 
 func partPayload(p *Part, cached bool) J {
@@ -151,6 +159,7 @@ func partPayload(p *Part, cached bool) J {
 		"tiers": tiers, "image": image, "url": manualURL(p.PartNumber), "cached": cached,
 		// The browser tries McMaster's own address first, then the stored copy.
 		"image_url": p.ImageURL, "image_local": local, "image_note": p.ImageNote,
+		"choices": nonNil(p.Choices), "variants": nonNil(p.Variants),
 	}
 }
 
@@ -235,6 +244,7 @@ func (s *Server) addItem(w http.ResponseWriter, r *http.Request) {
 		Quantity   flexInt     `json:"quantity"`
 		Tiers      []PriceTier `json:"tiers"`
 		UnitPrice  flexFloat   `json:"unit_price"` // manual entry, when there are no tiers
+		Selections []Selection `json:"selections"` // options chosen on this part number
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, 400, J{"ok": false, "error": "בקשה לא תקינה."})
@@ -265,17 +275,34 @@ func (s *Server) addItem(w http.ResponseWriter, r *http.Request) {
 	if cached != nil && cached.Source == "auto" && len(cached.Tiers) > 0 {
 		tiers = cached.Tiers
 	}
+	unit := strings.TrimSpace(in.Unit)
+	var sel []Selection
+	var variantPN string
+	if cached != nil && len(cached.Choices) > 0 {
+		var msg string
+		if sel, msg = checkSelections(cached.Choices, in.Selections); msg != "" {
+			writeJSON(w, 400, J{"ok": false, "error": msg})
+			return
+		}
+		if v := findVariant(cached.Variants, sel); v != nil {
+			variantPN, tiers = v.PartNumber, v.Tiers
+			if v.Unit != "" {
+				unit = v.Unit
+			}
+		}
+	}
 	if len(tiers) == 0 && in.UnitPrice.V > 0 {
 		tiers = []PriceTier{{Min: 1, Price: round2(in.UnitPrice.V)}}
 	}
 
 	it := Item{
-		PartNumber: pn, Name: name, Unit: strings.TrimSpace(in.Unit), Tiers: tiers,
+		PartNumber: pn, Name: name, Unit: unit, Tiers: tiers, Selections: sel, VariantPN: variantPN,
 		Quantity: qty, Image: strings.TrimSpace(in.Image),
 		UserID: u.ID, Requester: u.Name, Project: project, Purpose: strings.TrimSpace(in.Purpose),
 	}
-	// Remember manual / bookmarklet details so the next lookup of this part is instant.
-	if cached == nil || cached.Name != it.Name || cached.Unit != it.Unit || len(cached.Tiers) == 0 {
+	// Remember manual / bookmarklet details so the next lookup of this part is
+	// instant (a part with choices keeps what the lookup found).
+	if cached == nil || len(cached.Choices) == 0 && (cached.Name != it.Name || cached.Unit != it.Unit || len(cached.Tiers) == 0) {
 		p := Part{PartNumber: pn, Name: it.Name, Unit: it.Unit, Tiers: tiers, Source: in.Source}
 		if p.Source == "" {
 			p.Source = "manual"
@@ -296,6 +323,49 @@ func (s *Server) addItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, J{"ok": true, "item": saved})
+}
+
+// checkSelections returns the chosen options in the product's order, or a
+// message naming what is missing or not one of the options.
+func checkSelections(choices []Choice, in []Selection) ([]Selection, string) {
+	got := map[string]string{}
+	for _, x := range in {
+		got[x.Name] = strings.TrimSpace(x.Value)
+	}
+	var out []Selection
+	var missing []string
+	for _, c := range choices {
+		v := got[c.Name]
+		if v == "" {
+			missing = append(missing, c.Name)
+			continue
+		}
+		if !c.Free && !slices.ContainsFunc(c.Options, func(o ChoiceOption) bool { return o.Text == v }) {
+			return nil, fmt.Sprintf("'%s' אינו אחת האפשרויות של %s.", v, c.Name)
+		}
+		out = append(out, Selection{Name: c.Name, Value: v})
+	}
+	if len(missing) > 0 {
+		return nil, "צריך לבחור: " + strings.Join(missing, ", ")
+	}
+	return out, ""
+}
+
+// findVariant is the combination matching every listed choice.
+func findVariant(vs []Variant, sel []Selection) *Variant {
+	for i, v := range vs {
+		ok := true
+		for _, x := range sel {
+			if want, listed := v.Values[x.Name]; listed && want != x.Value {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return &vs[i]
+		}
+	}
+	return nil
 }
 
 // cleanTiers drops nonsense and sorts tiers coming from the browser.
@@ -451,7 +521,11 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 	usd := `"USD "#,##0.00`
 	money, _ := f.NewStyle(&excelize.Style{CustomNumFmt: &usd})
 	for i, it := range items {
-		row := []any{po, excelDate(poDate), it.PartNumber, it.Name, it.Unit, it.UnitPrice, it.Quantity,
+		desc := it.Name
+		if len(it.Selections) > 0 {
+			desc += " — " + selectionText(it.Selections)
+		}
+		row := []any{po, excelDate(poDate), it.PartNumber, desc, it.Unit, it.UnitPrice, it.Quantity,
 			it.Requester, excelDate(it.CreatedAt[:10]), it.Project, it.Purpose, it.Total}
 		cell, _ := excelize.CoordinatesToCellName(1, i+2)
 		f.SetSheetRow(sheet, cell, &row)

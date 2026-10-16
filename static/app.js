@@ -139,7 +139,7 @@ document.querySelectorAll(".tab").forEach((btn) =>
 // Columns: key -> [header, cell renderer]. Editable cells carry data-edit.
 const COLS = {
   pn: ["מק״ט", (it) => `<a dir="ltr" href="https://www.mcmaster.com/${esc(it.part_number)}/" target="_blank" rel="noopener">${esc(it.part_number)}</a>`],
-  name: ["תיאור", (it) => `<span dir="ltr">${esc(it.name)}</span>`],
+  name: ["תיאור", (it) => `<span dir="ltr">${esc(it.name)}</span>${selectionHTML(it)}`],
   unit: ["UOM", (it) => `<span dir="ltr">${esc(it.unit)}</span>`],
   price: ["מחיר ליחידה", (it) => money(it.unit_price)],
   qty: ["כמות", (it) => it.quantity],
@@ -151,6 +151,14 @@ const COLS = {
   total: ["סה״כ", (it) => `<b>${money(it.total)}</b>`],
   del: ["", () => `<button class="link del" title="מחק">✕</button>`],
 };
+
+// "Length: 100 · Color: Black" under the name, for options chosen on one part number.
+function selectionHTML(it) {
+  if (!it.selections || !it.selections.length) return "";
+  const text = it.selections.map((x) => `${x.name}: ${x.value}`).join(" · ");
+  const pn = it.variant_pn ? ` <span class="muted">(${esc(it.variant_pn)})</span>` : "";
+  return `<div class="sel" dir="ltr">${esc(text)}${pn}</div>`;
+}
 
 function renderTable(table, items, cols, emptyText) {
   if (!items.length) {
@@ -200,27 +208,36 @@ function packHint(unit) {
   return "";
 }
 
-function currentTiers() {
+// Prices found by the lookup: the product's, or for a product with choices,
+// those of the chosen combination (none until every choice is made).
+function lookedUpTiers() {
   const p = state.part;
-  if (p && p.tiers && p.tiers.length) return p.tiers;
+  if (!p) return [];
+  if (p.choices && p.choices.length) return (state.variant && state.variant.tiers) || [];
+  return p.tiers || [];
+}
+
+function currentTiers() {
+  const found = lookedUpTiers();
+  if (found.length) return found;
   const manual = parseFloat(String($("#f-price").value).replace(/[$,\s]/g, ""));
   return manual > 0 ? [{ min: 1, max: 0, price: manual }] : [];
 }
 
 function updatePricing() {
   const qty = Math.max(1, parseInt($("#f-qty").value, 10) || 1);
-  const p = state.part;
-  const hasTiers = p && p.tiers && p.tiers.length > 0;
+  const tiers = lookedUpTiers();
+  const hasTiers = tiers.length > 0;
   const unit = unitPriceFor(currentTiers(), qty);
   $("#f-price").readOnly = hasTiers;
   if (hasTiers) $("#f-price").value = unit.toFixed(2);
   $("#f-total").textContent = unit ? money(unit * qty) : "—";
   const box = $("#f-tiers");
-  if (hasTiers && p.tiers.length > 1) {
+  if (hasTiers && tiers.length > 1) {
     box.classList.remove("hidden");
     box.innerHTML =
       `<div class="tiers-head">מחיר ליחידה לפי כמות</div><div class="tiers-row">` +
-      p.tiers
+      tiers
         .map((t) => {
           const active = qty >= t.min && (t.max === 0 || qty <= t.max);
           return `<div class="tier${active ? " active" : ""}"><span class="q" dir="ltr">${tierLabel(t)}</span><span class="p" dir="ltr">${money(t.price)}</span></div>`;
@@ -246,12 +263,86 @@ function showItemForm(part) {
   $("#f-requester").value = state.me.name;
   $("#f-date").textContent = day(new Date().toISOString());
   $("#f-purpose").value = "";
-  updatePricing();
+  state.sel = {};
+  state.variant = null;
+  renderChoices();
+  applyChoices();
   $("#item-form").classList.remove("hidden");
   const qty = $("#f-qty");
   (part.name ? qty : $("#f-name")).focus();
   if (part.name) qty.select();
 }
+
+// ----- choices on one part number (length, color …) -----
+// Each "Choose a …" becomes a row of buttons (or a text box when McMaster
+// asks to type a value). When every choice is made, the matching combination
+// gives the price and unit.
+function renderChoices() {
+  const p = state.part;
+  const box = $("#f-choices");
+  if (!p.choices || !p.choices.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML =
+    p.choices
+      .map(
+        (c) => `<div class="choice"><div class="choice-label" dir="ltr">${esc(c.label || c.name)}</div>` +
+          (c.free
+            ? `<input class="choice-input" dir="ltr" data-choice="${esc(c.name)}" placeholder="${esc(c.name)}">`
+            : `<div class="choice-opts">${c.options
+                .map((o) => `<button type="button" class="opt" dir="ltr" data-choice="${esc(c.name)}" data-value="${esc(o.text)}">${esc(o.text)}</button>`)
+                .join("")}</div>`) +
+          `</div>`,
+      )
+      .join("") + `<p id="f-choice-note" class="choice-note"></p>`;
+}
+
+function missingChoices() {
+  return (state.part.choices || []).filter((c) => !state.sel[c.name]).map((c) => c.name);
+}
+
+function applyChoices() {
+  const p = state.part;
+  if (p.choices && p.choices.length) {
+    const missing = missingChoices();
+    state.variant = missing.length
+      ? null
+      : (p.variants || []).find((v) => Object.entries(v.values).every(([k, val]) => state.sel[k] === val)) || null;
+    $("#f-unit").value = (state.variant && state.variant.unit) || p.unit || "";
+    $("#f-qty-hint").textContent = packHint($("#f-unit").value);
+    const note = $("#f-choice-note");
+    if (missing.length) {
+      note.textContent = `בחר ${missing.join(" ו-")} כדי לראות מחיר.`;
+      note.className = "choice-note";
+    } else if (state.variant) {
+      note.innerHTML = `מק״ט פנימי של הבחירה ב-McMaster: <b dir="ltr">${esc(state.variant.part_number)}</b>`;
+      note.className = "choice-note ok";
+    } else {
+      note.textContent = "לא מצאתי מחיר לשילוב הזה – הזן מחיר ליחידה ידנית.";
+      note.className = "choice-note warn";
+    }
+    document.querySelectorAll("#f-choices .opt").forEach((b) => {
+      b.classList.toggle("active", state.sel[b.dataset.choice] === b.dataset.value);
+    });
+  }
+  updatePricing();
+}
+
+$("#f-choices").addEventListener("click", (e) => {
+  const b = e.target.closest(".opt");
+  if (!b) return;
+  const name = b.dataset.choice;
+  state.sel[name] = state.sel[name] === b.dataset.value ? "" : b.dataset.value;
+  applyChoices();
+});
+$("#f-choices").addEventListener("input", (e) => {
+  if (!e.target.dataset.choice) return;
+  state.sel[e.target.dataset.choice] = e.target.value.trim();
+  applyChoices();
+});
 
 // ----- loading card: steps + seconds, so a long lookup visibly progresses -----
 let loadTimer = null;
@@ -401,6 +492,8 @@ $("#item-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const project = $("#f-project").value;
   if (!project) return toast("בחר פרויקט.", true);
+  const missing = missingChoices();
+  if (missing.length) return toast(`צריך לבחור: ${missing.join(", ")}`, true);
   localStorage.setItem("project", project);
   const tiers = currentTiers();
   const data = await api("/api/items", {
@@ -415,6 +508,7 @@ $("#item-form").addEventListener("submit", async (e) => {
       project,
       purpose: $("#f-purpose").value.trim(),
       source: state.part.source,
+      selections: (state.part.choices || []).map((c) => ({ name: c.name, value: state.sel[c.name] || "" })),
     },
   });
   if (!data.ok) return toast(data.error, true);
