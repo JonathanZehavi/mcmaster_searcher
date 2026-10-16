@@ -45,7 +45,18 @@ func redPNG() []byte {
 // real site uses.
 var fakeCatalog = map[string]string{
 	"7129K21": `{"partNumber":"7129K21","unitOfMeasure":"Pack of 10","parentDescription":"Brass Hex Nut","suffixDescription":"1/4\"-20 Thread Size","pricingData":{"price":"$5.12 per pack of 10","priceLevels":[{"QuantityRangeMessage":"1-9 packs","PriceMessage":"$5.12","SellPrice":5.12},{"QuantityRangeMessage":"10 or more","PriceMessage":"$4.60","SellPrice":4.6}],"shouldShowPrice":true}}`,
+	"5555W1":  `{"partNumber":"5555W1","unitOfMeasure":"Each","parentDescription":"Steel Washer","suffixDescription":"M6","pricingData":{"priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$0.40","SellPrice":0.4}],"shouldShowPrice":true}}`,
+	"5555W2":  `{"partNumber":"5555W2","unitOfMeasure":"Each","parentDescription":"Steel Washer","suffixDescription":"M8","pricingData":{"priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$0.55","SellPrice":0.55}],"shouldShowPrice":true}}`,
 	"7129K22": `{"partNumber":"7129K22","unitOfMeasure":"Each","parentDescription":"Brass Hex Nut","suffixDescription":"5/16\"-18 Thread Size","pricingData":{"price":"$0.88 each","priceLevels":[{"QuantityRangeMessage":"","PriceMessage":"$0.88","SellPrice":0.88}],"shouldShowPrice":true}}`,
+}
+
+const wallHTML = `<!doctype html><html><head><title>McMaster-Carr</title></head><body>
+<h1>To continue browsing, please log in.</h1><a href="/login">Log in</a></body></html>`
+
+// seenOther: this session already viewed a product other than pn.
+func seenOther(r *http.Request, pn string) bool {
+	c, err := r.Cookie("seen")
+	return err == nil && c.Value != pn
 }
 
 // pageHits counts product page loads per part number (to prove the fast path skips them).
@@ -60,6 +71,10 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 		case r.URL.Path == "/mv123/app.js":
 			w.Header().Set("Content-Type", "text/javascript")
 			w.Write([]byte("// site bundle"))
+		case r.URL.Path == "/mv123"+orderInfoPath && strings.HasPrefix(r.URL.Query().Get("partNumber"), "5555W") && seenOther(r, r.URL.Query().Get("partNumber")):
+			// The session already used up its views: McMaster's hard wall.
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(wallHTML))
 		case r.URL.Path == "/mv123"+orderInfoPath:
 			body, ok := fakeCatalog[r.URL.Query().Get("partNumber")]
 			if !ok {
@@ -79,6 +94,17 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			n, _ := pageHits.LoadOrStore(pn, new(atomic.Int32))
 			n.(*atomic.Int32).Add(1)
 			http.ServeFile(w, r, "testdata/login-wall.html")
+		case strings.HasPrefix(r.URL.Path, "/5555W"):
+			// One product per anonymous session, then the hard wall.
+			pn := strings.Trim(r.URL.Path, "/")
+			if seenOther(r, pn) {
+				w.Write([]byte(wallHTML))
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: "seen", Value: pn, Path: "/"})
+			http.ServeFile(w, r, "testdata/login-wall.html")
+		case strings.HasPrefix(r.URL.Path, "/6666W"):
+			w.Write([]byte(wallHTML)) // walled whatever the session (e.g. by address)
 		case strings.HasPrefix(r.URL.Path, "/img/protected"):
 			// Like a site that refuses downloads: only an <img> on the page gets it.
 			if r.Header.Get("Sec-Fetch-Dest") != "image" {
@@ -167,10 +193,6 @@ func TestScraperExtractsProduct(t *testing.T) {
 	if !contains(p.NameOptions, "M3 x 0.5 mm Thread, 8 mm Long") {
 		t.Fatalf("missing spec line in options: %v", p.NameOptions)
 	}
-	b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile))
-	if err != nil || !bytes.Equal(b, png1x1) {
-		t.Fatalf("image not saved: %q %v", p.ImageFile, err)
-	}
 }
 
 func TestScraperExtractsQuantityTiers(t *testing.T) {
@@ -178,11 +200,6 @@ func TestScraperExtractsQuantityTiers(t *testing.T) {
 	p, err := s.Lookup("8336N108")
 	if err != nil {
 		t.Fatal(err)
-	}
-	// The image refuses downloads: it must come from a picture of the page.
-	b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile))
-	if err != nil || len(b) < 100 || !bytes.HasPrefix(b, []byte("\x89PNG")) {
-		t.Fatalf("protected image not captured: file=%q err=%v size=%d", p.ImageFile, err, len(b))
 	}
 	want := []PriceTier{{Min: 1, Max: 11, Price: 28.46}, {Min: 12, Max: 0, Price: 25.93}}
 	if fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
@@ -202,8 +219,8 @@ func TestNetworkDietRules(t *testing.T) {
 		block bool
 	}{
 		{"https://www.mcmaster.com/static/app.js", network.ResourceTypeScript, false},
-		{"https://images.mcmaster.com/x.png", network.ResourceTypeImage, false},
-		{"https://cdn.other.com/pic.png", network.ResourceTypeImage, false}, // images always load
+		{"https://www.mcmaster.com/7129K21/", network.ResourceTypeDocument, false},
+		{"https://images.mcmaster.com/x.png", network.ResourceTypeImage, true}, // no product picture: skip images
 		{"https://www.mcmaster.com/font.woff2", network.ResourceTypeFont, true},
 		{"https://chat.widget.io/loader.js", network.ResourceTypeScript, true},
 		{"https://stats.example/collect", network.ResourceTypeXHR, true},
@@ -253,9 +270,6 @@ func TestLoginWallUsesDataCallsThenFastPath(t *testing.T) {
 	if p.Name != `Brass Hex Nut, 1/4"-20 Thread Size` || p.Unit != "Pack of 10" || fmt.Sprint(p.Tiers) != fmt.Sprint(want) {
 		t.Fatalf("got %+v", p)
 	}
-	if b, err := os.ReadFile(filepath.Join(s.ImagesDir, p.ImageFile)); err != nil || !bytes.HasPrefix(b, []byte("\x89PNG")) {
-		t.Fatalf("image not saved: %q %v", p.ImageFile, err)
-	}
 	if s.lastHow != "page" || s.mv != "mv123" || !strings.Contains(s.infoTmpl, "features=enablemnitpns") {
 		t.Fatalf("fast path not prepared: how=%s mv=%q tmpl=%q", s.lastHow, s.mv, s.infoTmpl)
 	}
@@ -264,7 +278,7 @@ func TestLoginWallUsesDataCallsThenFastPath(t *testing.T) {
 	if err != nil || s.lastHow != "direct" || hits("7129K22") != 0 {
 		t.Fatalf("second lookup should skip the page: how=%s hits=%d err=%v", s.lastHow, hits("7129K22"), err)
 	}
-	if p.Unit != "Each" || len(p.Tiers) != 1 || p.Tiers[0] != (PriceTier{Min: 1, Max: 0, Price: 0.88}) || p.ImageFile == "" {
+	if p.Unit != "Each" || len(p.Tiers) != 1 || p.Tiers[0] != (PriceTier{Min: 1, Max: 0, Price: 0.88}) {
 		t.Fatalf("direct result: %+v", p)
 	}
 
@@ -274,6 +288,33 @@ func TestLoginWallUsesDataCallsThenFastPath(t *testing.T) {
 	}
 	if s.apiTab == nil {
 		t.Fatal("an unknown part number must not close the fast path")
+	}
+}
+
+// After a few anonymous views McMaster shows "To continue browsing, please
+// log in" everywhere. That text must never become a product name: the lookup
+// forgets the session (cookies), comes back as a new visitor and succeeds.
+func TestHardLoginWallStartsFreshSession(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	if p, err := s.Lookup("5555W1"); err != nil || p.Name != "Steel Washer, M6" {
+		t.Fatalf("first lookup: %+v %v", p, err)
+	}
+	p, err := s.Lookup("5555W2") // the fast path hits the wall; a fresh session recovers
+	if err != nil || p.Name != "Steel Washer, M8" || p.Tiers[0].Price != 0.55 {
+		t.Fatalf("after the wall: %+v %v", p, err)
+	}
+}
+
+// A wall that stays (not tied to the session) fails fast with a clear message.
+func TestPersistentLoginWallFailsClearly(t *testing.T) {
+	s := newTestScraper(t, fakeMcMaster(t).URL)
+	t0 := time.Now()
+	p, err := s.Lookup("6666W1")
+	if err == nil || !strings.Contains(err.Error(), "להתחבר") {
+		t.Fatalf("want a login-wall error, got %+v %v", p, err)
+	}
+	if d := time.Since(t0); d > 6*time.Second {
+		t.Fatalf("took %v: the wall should be recognized at once", d)
 	}
 }
 
@@ -788,5 +829,65 @@ func TestConcurrentLookupsShareOne(t *testing.T) {
 	wg.Wait()
 	if n := sc.calls.Load(); n != 1 {
 		t.Fatalf("%d lookups for one part number", n)
+	}
+}
+
+// ---------- storage and the fixed manager ----------
+
+// With DATABASE_URL the data lives in Postgres and survives a restart.
+// Runs only when MCM_TEST_DATABASE_URL points at a disposable database.
+func TestPostgresStoreSurvivesRestart(t *testing.T) {
+	dsn := os.Getenv("MCM_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("MCM_TEST_DATABASE_URL not set")
+	}
+	s, err := OpenPostgresStore(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.back.(pgBackend).db.Exec(`DELETE FROM app_state`)
+	if s, err = OpenPostgresStore(dsn); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := s.FindOrCreateUser("Dana_Cohen")
+	if _, err := s.AddItem(Item{PartNumber: "91251A540", Name: "Screw", Quantity: 3, UserID: u.ID, Requester: u.Name, Project: "CWC"}); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := OpenPostgresStore(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s2.OpenItems(0); len(got) != 1 || got[0].Requester != "Dana_Cohen" || s2.UserByName("dana_cohen") == nil {
+		t.Fatalf("data lost on restart: %+v", got)
+	}
+}
+
+// MCM_ADMIN_NAME/PASSWORD make a fixed manager on every start, so a data
+// wipe can never hand manager mode to whoever enters a password first.
+func TestManagerFromEnvironment(t *testing.T) {
+	store, _ := OpenStore(filepath.Join(t.TempDir(), "orders.json"))
+	t.Setenv("MCM_ADMIN_NAME", "jonathan zehavi")
+	t.Setenv("MCM_ADMIN_PASSWORD", testPW("boss"))
+	if err := ensureAdminFromEnv(store); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureAdminFromEnv(store); err != nil { // every start: idempotent
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewServer(store, &stubScraper{}, t.TempDir(), Extractor{}))
+	t.Cleanup(srv.Close)
+
+	other := newClient(t, srv.URL)
+	other.mustOK("POST", "/api/identify", map[string]any{"name": "Someone_Else"})
+	if code, _ := other.do("POST", "/api/admin/enter", map[string]any{"password": testPW("other")}); code != 401 {
+		t.Fatalf("another user became manager: %d", code)
+	}
+	boss := newClient(t, srv.URL)
+	boss.mustOK("POST", "/api/identify", map[string]any{"name": "Jonathan_Zehavi"})
+	boss.mustOK("POST", "/api/admin/enter", map[string]any{"password": testPW("boss")})
+
+	t.Setenv("MCM_ADMIN_PASSWORD", "x")
+	if ensureAdminFromEnv(store) == nil {
+		t.Fatal("a too-short password must be refused")
 	}
 }

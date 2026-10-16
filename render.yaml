@@ -2,14 +2,10 @@
 # It builds the Dockerfile and gives the site an https address. You are asked
 # for MCM_ACCESS_CODE (the office code employees type once) on creation.
 #
-# FREE PLAN (proof of concept): no persistent disk, so the list, users and
-# projects reset whenever the service sleeps (15 min idle) or redeploys.
-# For real use switch to the paid plan and keep the data on a disk:
-#     plan: starter
-#     disk:
-#       name: data
-#       mountPath: /data
-#       sizeGB: 1
+# FREE PLAN: no persistent disk, so keep the data in a free Postgres database
+# (e.g. Neon): set DATABASE_URL to its connection string. Without it the list,
+# users and projects reset whenever the service sleeps or redeploys.
+# MCM_ADMIN_NAME / MCM_ADMIN_PASSWORD: the manager, set again on every start.
 services:
   - type: web
     name: mcmaster-orders
@@ -19,6 +15,12 @@ services:
     autoDeploy: true
     envVars:
       - key: MCM_ACCESS_CODE
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: MCM_ADMIN_NAME
+        sync: false
+      - key: MCM_ADMIN_PASSWORD
         sync: false
       - key: TZ
         value: Asia/Jerusalem

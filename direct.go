@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,7 +24,14 @@ import (
 var (
 	errNoFastPath = errors.New("fast path not ready")
 	errNotProduct = errors.New("the data call did not return product details")
+	// errWall: McMaster answered with its "please log in to continue
+	// browsing" wall (an anonymous session that has seen too many pages).
+	errWall = errors.New("McMaster asks to log in to continue browsing")
 )
+
+// wallRe matches McMaster's hard login wall. Not the soft "Log in to view
+// Product Detail" banner: behind that one the data calls still answer.
+var wallRe = regexp.MustCompile(`(?i)continue browsing`)
 
 // mvFromPageJS finds the site version segment in the page's own URLs.
 const mvFromPageJS = `(() => {
@@ -33,18 +41,14 @@ const mvFromPageJS = `(() => {
 	return m ? m[1] : "";
 })()`
 
-// directJS asks both data calls and returns their status and text.
-// %s: the two URLs (JSON strings).
-const directJS = `(async (infoURL, contentURL) => {
-	const get = async (u) => {
-		try {
-			const r = await fetch(u, { credentials: "include" });
-			return { status: r.status, text: await r.text() };
-		} catch (e) { return { status: 0, text: String(e) }; }
-	};
-	const [info, content] = await Promise.all([get(infoURL), get(contentURL)]);
-	return { info, content };
-})(%s, %s)`
+// directJS asks the product data call and returns its status and text.
+// %s: the URL (a JSON string).
+const directJS = `(async (u) => {
+	try {
+		const r = await fetch(u, { credentials: "include" });
+		return { status: r.status, text: await r.text() };
+	} catch (e) { return { status: 0, text: String(e) }; }
+})(%s)`
 
 const pnPlaceholder = "{PN}"
 
@@ -113,60 +117,28 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 	t0 := time.Now()
 	ctx, cancel := context.WithTimeout(s.apiTab, 15*time.Second)
 	defer cancel()
-	infoURL, contentURL := s.callURLs(pn)
+	infoURL, _ := s.callURLs(pn)
 	var res struct {
-		Info, Content struct {
-			Status int
-			Text   string
-		}
+		Status int
+		Text   string
 	}
-	err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(directJS, jsString(infoURL), jsString(contentURL)), &res,
+	err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(directJS, jsString(infoURL)), &res,
 		func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }))
 	if err != nil {
 		return nil, err
 	}
-	if res.Info.Status != 200 {
-		return nil, fmt.Errorf("data call answered %d", res.Info.Status)
+	if res.Status == 401 || res.Status == 403 || wallRe.MatchString(res.Text) {
+		return nil, errWall
 	}
-	p, ok := parseOrderInfo(res.Info.Text, pn)
+	if res.Status != 200 {
+		return nil, fmt.Errorf("data call answered %d", res.Status)
+	}
+	p, ok := parseOrderInfo(res.Text, pn)
 	if !ok {
 		return nil, errNotProduct
 	}
-	p.ImageNote = "no-path"
-	if res.Content.Status == 200 {
-		if path := parseImagePath(res.Content.Text); path != "" {
-			p.ImageURL = s.absURL(path)
-			p.ImageFile, _ = s.saveImage(ctx, pn, p.ImageURL)
-			p.ImageNote = imageNote(p)
-		}
-	}
 	s.lastHow = "direct"
-	log.Printf("lookup %s: %.2fs via the site's data call (no page load); %d price tiers; image=%v",
-		pn, time.Since(t0).Seconds(), len(p.Tiers), p.ImageFile != "")
+	log.Printf("lookup %s: %.2fs via the site's data call (no page load); %d price tiers",
+		pn, time.Since(t0).Seconds(), len(p.Tiers))
 	return p, nil
-}
-
-// fillImageFromContent adds the image from the page's own ProductContent
-// call, waiting briefly for it to arrive.
-func (s *Scraper) fillImageFromContent(ctx context.Context, rec *netRecorder, p *Part) {
-	p.ImageNote = "no-path"
-	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(150 * time.Millisecond) {
-		if body, _, ok := rec.find(contentPath); ok {
-			if path := parseImagePath(body); path != "" {
-				p.ImageURL = s.absURL(path)
-				p.ImageFile, _ = s.saveImage(ctx, p.PartNumber, p.ImageURL)
-				p.ImageNote = imageNote(p)
-			}
-			return
-		}
-	}
-}
-
-// imageNote says why a part with an image address has no stored copy.
-// The browser can still show it straight from McMaster.
-func imageNote(p *Part) string {
-	if p.ImageFile == "" {
-		return "download-failed"
-	}
-	return ""
 }

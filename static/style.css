@@ -116,7 +116,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .search-hero .status { max-width: 640px; margin-left: auto; margin-right: auto; }
 
 /* ===== product card ===== */
-.product-card { display: grid; grid-template-columns: 280px 1fr; gap: 26px; padding: 22px; }
+.product-card { display: grid; grid-template-columns: 1fr; gap: 26px; padding: 22px; }
 .pc-media { display: flex; flex-direction: column; gap: 10px; }
 .pc-image {
   width: 100%; aspect-ratio: 1; border: 1px solid var(--line); border-radius: var(--radius); background: #fff;

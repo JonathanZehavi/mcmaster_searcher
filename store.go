@@ -120,12 +120,38 @@ type storeData struct {
 	Projects    []string            `json:"projects"`
 }
 
-// Store keeps everything in one JSON file. The data is small (a few thousand
-// rows a year), so a file rewrite per change is fine and needs no database.
+// Store keeps everything as one JSON document: in a file, or in a Postgres
+// row when DATABASE_URL is set (hosts without a disk wipe files on restart).
+// The data is small (a few thousand rows a year), so rewriting the whole
+// document per change is fine.
 type Store struct {
-	path string
+	back backend
 	mu   sync.Mutex
 	d    storeData
+}
+
+// backend is where the JSON document lives.
+type backend interface {
+	load() ([]byte, error) // nil, nil: nothing saved yet
+	write([]byte) error
+}
+
+type fileBackend struct{ path string }
+
+func (f fileBackend) load() ([]byte, error) {
+	b, err := os.ReadFile(f.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
+func (f fileBackend) write(b []byte) error {
+	tmp := f.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, f.path)
 }
 
 var (
@@ -138,16 +164,21 @@ var (
 func now() string   { return time.Now().Format("2006-01-02T15:04:05") }
 func today() string { return time.Now().Format("2006-01-02") }
 
+// OpenStore opens the JSON file at path.
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	return openStore(fileBackend{path})
+}
+
+func openStore(back backend) (*Store, error) {
+	s := &Store{back: back}
+	b, err := back.load()
+	if err != nil {
 		return nil, err
 	}
-	if err == nil {
+	if b != nil {
 		if err := json.Unmarshal(b, &s.d); err != nil {
 			return nil, err
 		}
@@ -171,11 +202,7 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return s.back.write(b)
 }
 
 // ---------- parts ----------

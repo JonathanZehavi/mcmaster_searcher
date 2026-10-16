@@ -2,15 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
-	"io"
 	"log"
-	"mime"
-	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -25,7 +20,7 @@ import (
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -150,14 +145,29 @@ func (s *Scraper) Lookup(pn string) (*Part, error) {
 	}
 	defer func() { s.last = time.Now() }()
 	// Fast path first: ask McMaster's data calls from the open tab.
-	if p, err := s.direct(pn); err == nil {
+	p, err := s.direct(pn)
+	switch {
+	case err == nil:
 		return p, nil
-	} else if err != errNoFastPath && err != errNotProduct {
+	case err == errWall:
+		log.Printf("lookup %s: McMaster's login wall on the data call; starting a fresh session", pn)
+		s.resetSession()
+	case err != errNoFastPath && err != errNotProduct:
 		log.Printf("lookup %s: direct data call failed (%v); loading the page instead", pn, err)
 		s.closeAPITab()
 	}
 	diet := !s.dietOff
 	p, kind, err := s.lookup(pn, diet)
+	if kind == failWall {
+		// The anonymous session hit McMaster's page limit: forget it (cookies
+		// and all) and try once more as a new visitor.
+		log.Printf("lookup %s: McMaster's login wall; starting a fresh session and retrying once", pn)
+		s.resetSession()
+		if p, kind, err = s.lookup(pn, diet); kind == failWall {
+			return nil, &LookupError{Msg: "McMaster מבקשים להתחבר כדי להמשיך לגלוש, גם אחרי פתיחת חיבור חדש. כנראה חסימה זמנית לפי כתובת השרת – נסה שוב בעוד כמה דקות, או הזן את הפרטים ידנית."}
+		}
+		return p, err
+	}
 	if err != nil && diet && (kind == failLoad || kind == failUnrecognized) {
 		// Maybe the diet refused something the page needs: try once without it.
 		// If that works, the diet stays off from now on (and the log says why).
@@ -201,6 +211,28 @@ func (s *Scraper) Warm() {
 	}
 	cancel()
 	log.Printf("warm-up: no site version found; lookups will load pages")
+}
+
+// resetSession forgets McMaster's cookies and stored data, so the next request
+// comes from a new anonymous visitor. If that fails, the browser restarts.
+func (s *Scraper) resetSession() {
+	s.closeAPITab()
+	if s.browserCtx == nil || s.browserCtx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.browserCtx, 5*time.Second)
+	defer cancel()
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
+		if err := network.ClearBrowserCookies().Do(c); err != nil {
+			return err
+		}
+		return storage.ClearDataForOrigin(s.BaseURL, "all").Do(c)
+	}))
+	if err != nil {
+		log.Printf("could not clear McMaster's cookies (%v); restarting the browser", err)
+		s.stopBrowser()
+		s.browserCtx, s.stopBrowser = nil, nil
+	}
 }
 
 // Close shuts the browser down (on exit, so no Chrome is left running).
@@ -323,9 +355,10 @@ func (s *Scraper) firstParty(host string) bool {
 func (s *Scraper) shouldBlock(rawURL string, rt network.ResourceType, stats *tabStats) bool {
 	switch rt {
 	case network.ResourceTypeFont, network.ResourceTypeMedia, network.ResourceTypePing,
-		network.ResourceTypeCSPViolationReport, network.ResourceTypeTextTrack:
+		network.ResourceTypeCSPViolationReport, network.ResourceTypeTextTrack,
+		network.ResourceTypeImage: // no product picture any more: skip all images
 		return true
-	case network.ResourceTypeDocument, network.ResourceTypeImage:
+	case network.ResourceTypeDocument:
 		return false
 	}
 	u, err := url.Parse(rawURL)
@@ -404,13 +437,15 @@ func navigateNoWait(url string) chromedp.Action {
 // readyJS is a cheap "has the product appeared?" check. textContent does not
 // force the browser to lay out the page, unlike the full read, which matters
 // when it runs every 200 ms on a small server.
-// Bits: 1 = a heading exists, 2 = a price is in the text, 4 = block/404 text.
+// Bits: 1 = a heading exists, 2 = a price is in the text, 4 = block/404 text,
+// 8 = McMaster's "please log in to continue browsing" wall.
 const readyJS = `(() => {
 	const b = document.body; if (!b) return 0;
 	const t = b.textContent || "";
 	return (document.querySelector("h1, h2, h3") ? 1 : 0) +
 		(/\$\s?[\d,]+\.\d{2}/.test(t) ? 2 : 0) +
-		(/access denied|unusual traffic|are you a robot|captcha|no (?:products|results) (?:were )?found|not a valid part number/i.test(t) ? 4 : 0);
+		(/access denied|unusual traffic|are you a robot|captcha|no (?:products|results) (?:were )?found|not a valid part number/i.test(t) ? 4 : 0) +
+		(/continue browsing/i.test(t) ? 8 : 0);
 })()`
 
 // Lookup kinds of failure, used to decide whether a retry without the diet
@@ -418,6 +453,7 @@ const readyJS = `(() => {
 const (
 	failLoad         = "load"
 	failUnrecognized = "unrecognized"
+	failWall         = "wall" // McMaster's login wall: a fresh session may help
 )
 
 func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
@@ -465,7 +501,6 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 		// when the page shows "Log in to view Product Detail".
 		if body, u, ok := rec.find(orderInfoPath); ok {
 			if p, ok := parseOrderInfo(body, pn); ok {
-				s.fillImageFromContent(ctx, rec, p)
 				outcome, keepTab, s.lastHow = "ok", true, "page"
 				if m := mvSegmentRe.FindStringSubmatch(u); m != nil {
 					s.keepAPITab(tab, cancelTab, m[1])
@@ -474,13 +509,17 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 				} else {
 					keepTab = false
 				}
-				log.Printf("lookup %s: product data after %.1fs (from the site's data call); %d price tiers; image=%v",
-					pn, time.Since(t0).Seconds(), len(p.Tiers), p.ImageFile != "")
+				log.Printf("lookup %s: product data after %.1fs (from the site's data call); %d price tiers",
+					pn, time.Since(t0).Seconds(), len(p.Tiers))
 				return p, "", nil
 			}
 		}
 		var ready int
 		_ = chromedp.Run(ctx, chromedp.Evaluate(readyJS, &ready))
+		if ready&8 != 0 {
+			s.saveDebug(ctx, pn)
+			return nil, failWall, &LookupError{Msg: "McMaster מבקשים להתחבר כדי להמשיך לגלוש."}
+		}
 		if ready&3 == 3 || ready&4 != 0 || time.Since(lastFull) > 1500*time.Millisecond {
 			lastFull = time.Now()
 			var d extracted
@@ -531,104 +570,26 @@ func (s *Scraper) lookup(pn string, diet bool) (*Part, string, error) {
 
 	p := &Part{
 		PartNumber: pn, Name: data.Names[0], NameOptions: data.Names,
-		Unit: data.Unit, Tiers: data.Tiers, ImageURL: data.Image, Source: "auto",
+		Unit: data.Unit, Tiers: data.Tiers, Source: "auto",
 	}
 	if len(p.NameOptions) > 6 {
 		p.NameOptions = p.NameOptions[:6]
 	}
-	how := "none"
-	if data.Image != "" {
-		stats.allowURL(data.Image)
-		p.ImageFile, how = s.saveImage(ctx, pn, data.Image)
-	}
 	outcome, s.lastHow = "ok", "page"
-	log.Printf("lookup %s: product shown after %.1fs, done %.1fs; diet=%v blocked=%d %v; image=%s",
-		pn, tShown.Seconds(), time.Since(t0).Seconds(), diet, stats.blocked.Load(), stats.hosts(), how)
+	log.Printf("lookup %s: product shown after %.1fs, done %.1fs; diet=%v blocked=%d %v",
+		pn, tShown.Seconds(), time.Since(t0).Seconds(), diet, stats.blocked.Load(), stats.hosts())
 	return p, "", nil
 }
 
-// settle takes one more look a moment later (the price table can finish a beat
-// after the price) and gives the product image up to 2 s to finish loading,
-// so it can be photographed if it cannot be downloaded.
+// settle takes one more look a moment later: the price table can finish a
+// beat after the price.
 func (s *Scraper) settle(ctx context.Context, expr string, data extracted) extracted {
 	time.Sleep(300 * time.Millisecond)
-	for end := time.Now().Add(2 * time.Second); ; {
-		var d extracted
-		if chromedp.Run(ctx, chromedp.Evaluate(expr, &d)) == nil && len(d.Names) > 0 && len(d.Tiers) >= len(data.Tiers) {
-			data = d
-		}
-		if data.Image == "" || data.ImageReady || time.Now().After(end) {
-			return data
-		}
-		time.Sleep(250 * time.Millisecond)
+	var d extracted
+	if chromedp.Run(ctx, chromedp.Evaluate(expr, &d)) == nil && len(d.Names) > 0 && len(d.Tiers) >= len(data.Tiers) {
+		data = d
 	}
-}
-
-// saveImage stores the product image and says how it got it: the file itself
-// fetched from inside the page (same cookies as the page), else a picture of
-// the image as shown on screen (works even when downloads are refused), else
-// a plain download.
-func (s *Scraper) saveImage(ctx context.Context, pn, imageURL string) (string, string) {
-	var dataURL string
-	js := fmt.Sprintf(`fetch(%q).then(r => r.ok ? r.blob() : null).then(b => b ? new Promise(res => {
-		const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); }) : "").catch(() => "")`, imageURL)
-	fctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	_ = chromedp.Run(fctx, chromedp.Evaluate(js, &dataURL, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-		return p.WithAwaitPromise(true)
-	}))
-	cancel()
-	var body []byte
-	var ctype, how string
-	if meta, b64, ok := strings.Cut(dataURL, ";base64,"); ok {
-		ctype = strings.TrimPrefix(meta, "data:")
-		if strings.HasPrefix(ctype, "image/") {
-			body, _ = base64.StdEncoding.DecodeString(b64)
-			how = "fetched"
-		}
-	}
-	if len(body) == 0 {
-		var visible bool
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => { const el = document.querySelector('[data-mcm-img="1"]');
-			return !!(el && el.complete && el.naturalWidth > 0); })()`, &visible))
-		if visible {
-			sctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-			var shot []byte
-			if chromedp.Run(sctx, chromedp.Screenshot(`[data-mcm-img="1"]`, &shot, chromedp.ByQuery)) == nil && len(shot) > 0 {
-				body, ctype, how = shot, "image/png", "screenshot"
-			}
-			cancel()
-		}
-	}
-	if len(body) == 0 {
-		client := &http.Client{Timeout: 10 * time.Second}
-		if resp, err := client.Get(imageURL); err == nil {
-			if resp.StatusCode == 200 && strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
-				body, _ = io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-				ctype, how = resp.Header.Get("Content-Type"), "downloaded"
-			}
-			resp.Body.Close()
-		}
-	}
-	if len(body) == 0 {
-		return "", "failed"
-	}
-	ext := path.Ext(strings.SplitN(imageURL, "?", 2)[0])
-	if exts, _ := mime.ExtensionsByType(strings.Split(ctype, ";")[0]); len(exts) > 0 {
-		ext = exts[0]
-		for _, e := range exts {
-			if e == ".jpg" || e == ".png" || e == ".gif" || e == ".webp" {
-				ext = e
-			}
-		}
-	}
-	if ext == "" {
-		ext = ".img"
-	}
-	name := pn + ext
-	if err := os.WriteFile(filepath.Join(s.ImagesDir, name), body, 0o644); err != nil {
-		return "", "failed"
-	}
-	return name, how
+	return data
 }
 
 func (s *Scraper) saveDebug(ctx context.Context, pn string) string {

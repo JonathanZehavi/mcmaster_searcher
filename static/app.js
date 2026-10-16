@@ -138,9 +138,6 @@ document.querySelectorAll(".tab").forEach((btn) =>
 // ---------- tables ----------
 // Columns: key -> [header, cell renderer]. Editable cells carry data-edit.
 const COLS = {
-  // no-referrer: McMaster serves its product images only when the request
-  // doesn't say it comes from another site.
-  img: ["", (it) => (it.image ? `<img src="${esc(it.image)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : "")],
   pn: ["מק״ט", (it) => `<a dir="ltr" href="https://www.mcmaster.com/${esc(it.part_number)}/" target="_blank" rel="noopener">${esc(it.part_number)}</a>`],
   name: ["תיאור", (it) => `<span dir="ltr">${esc(it.name)}</span>`],
   unit: ["UOM", (it) => `<span dir="ltr">${esc(it.unit)}</span>`],
@@ -246,7 +243,6 @@ function showItemForm(part) {
   $("#f-qty").value = 1;
   $("#f-price").value = "";
   $("#f-qty-hint").textContent = packHint(part.unit);
-  setProductImage(part);
   $("#f-requester").value = state.me.name;
   $("#f-date").textContent = day(new Date().toISOString());
   $("#f-purpose").value = "";
@@ -375,43 +371,6 @@ $("#copy-pn").addEventListener("click", async () => {
   } catch {}
 });
 
-// Click the picture to see it large.
-$("#f-img-btn").addEventListener("click", () => {
-  const src = $("#f-img").getAttribute("src");
-  if (!src) return;
-  $("#img-big").src = src;
-  $("#img-dialog").showModal();
-});
-// Product image: McMaster's own address first (the employee's browser can
-// load it), then the copy stored on the server. If none loads, say why.
-const IMAGE_NOTES = {
-  "no-path": "McMaster לא שלחו תמונה למוצר הזה",
-  "download-failed": "השרת לא הצליח להוריד את התמונה",
-};
-function setProductImage(part) {
-  const img = $("#f-img");
-  const sources = [...new Set([part.image_url, part.image_local, part.image].filter(Boolean))];
-  part.shownImage = "";
-  const showNone = (why) => {
-    img.removeAttribute("src");
-    img.style.display = "none";
-    $("#f-noimg").style.display = "";
-    $("#f-imgnote").textContent = why || "";
-  };
-  const tryNext = (i) => {
-    if (i >= sources.length) {
-      return showNone(sources.length ? "התמונה לא נטענה בדפדפן" : IMAGE_NOTES[part.image_note] || "");
-    }
-    img.onerror = () => tryNext(i + 1);
-    img.onload = () => {
-      part.shownImage = sources[i];
-      img.style.display = "";
-      $("#f-noimg").style.display = "none";
-    };
-    img.src = sources[i];
-  };
-  tryNext(0);
-}
 
 $("#lookup-form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -452,7 +411,6 @@ $("#item-form").addEventListener("submit", async (e) => {
       unit: $("#f-unit").value.trim(),
       tiers,
       unit_price: $("#f-price").value,
-      image: state.part.shownImage || state.part.image || "",
       quantity: $("#f-qty").value,
       project,
       purpose: $("#f-purpose").value.trim(),
@@ -473,7 +431,7 @@ async function loadMine() {
   const { items } = await api("/api/items");
   state.mine = items;
   $("#mine-count").textContent = items.length;
-  renderTable($("#mine-table"), items, ["img", "pn", "name", "unit", "price", "qtyEdit", "requester", "date", "project", "purpose", "total", "del"], "עוד לא הוספת פריטים.");
+  renderTable($("#mine-table"), items, ["pn", "name", "unit", "price", "qtyEdit", "requester", "date", "project", "purpose", "total", "del"], "עוד לא הוספת פריטים.");
 }
 wireEditable($("#mine-table"), loadMine);
 
@@ -483,7 +441,7 @@ async function loadLast() {
   $("#last-title").textContent = order
     ? `ההזמנה האחרונה שלי – ${day(order.po_date)}${order.po_number ? ` · PO ${order.po_number}` : ""}`
     : "ההזמנה האחרונה שלי";
-  renderTable($("#last-table"), items, ["img", "pn", "name", "unit", "price", "qty", "requester", "date", "project", "purpose", "total"], "עוד לא בוצעה הזמנה עם פריטים שלך.");
+  renderTable($("#last-table"), items, ["pn", "name", "unit", "price", "qty", "requester", "date", "project", "purpose", "total"], "עוד לא בוצעה הזמנה עם פריטים שלך.");
 }
 
 // ---------- purchasing (admin) ----------
@@ -491,7 +449,7 @@ async function loadAll() {
   const { items } = await api("/api/items?scope=all");
   state.all = items;
   $("#all-count").textContent = items.length;
-  renderTable($("#all-table"), items, ["img", "pn", "name", "unit", "price", "qtyEdit", "requester", "date", "project", "purpose", "total", "del"], "הרשימה ריקה.");
+  renderTable($("#all-table"), items, ["pn", "name", "unit", "price", "qtyEdit", "requester", "date", "project", "purpose", "total", "del"], "הרשימה ריקה.");
 }
 wireEditable($("#all-table"), loadAll);
 
@@ -550,7 +508,7 @@ $("#orders-table").addEventListener("click", async (e) => {
   const { order, items } = await api(`/api/orders/${id}`);
   $("#order-title").textContent = `הזמנה מ-${day(order.po_date)}${order.po_number ? ` · PO ${order.po_number}` : ""}`;
   $("#order-export").href = `/api/export.xlsx?order=${order.id}`;
-  renderTable($("#order-table"), items, ["img", "pn", "name", "unit", "price", "qty", "requester", "date", "project", "purpose", "total"], "אין פריטים.");
+  renderTable($("#order-table"), items, ["pn", "name", "unit", "price", "qty", "requester", "date", "project", "purpose", "total"], "אין פריטים.");
   $("#order-detail").classList.remove("hidden");
   $("#order-detail").scrollIntoView({ behavior: "smooth" });
 });

@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -146,9 +147,19 @@ func main() {
 	}()
 
 	dir := dataDir()
-	store, err := OpenStore(filepath.Join(dir, "orders.json"))
-	if err != nil {
+	var store *Store
+	var err error
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		store, err = OpenPostgresStore(dsn)
+		if err != nil {
+			fail("cannot open the database (DATABASE_URL): " + firstLine(err.Error()))
+		}
+		log.Printf("data: Postgres database (DATABASE_URL)")
+	} else if store, err = OpenStore(filepath.Join(dir, "orders.json")); err != nil {
 		fail("cannot open data file: " + err.Error())
+	}
+	if err := ensureAdminFromEnv(store); err != nil {
+		fail("MCM_ADMIN_NAME / MCM_ADMIN_PASSWORD: " + err.Error())
 	}
 	scraper := NewScraper(dir)
 	// Close the shared browser when the window is closed or Ctrl+C is pressed,

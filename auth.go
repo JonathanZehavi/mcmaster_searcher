@@ -271,3 +271,29 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, J{"ok": true})
 	}
 }
+
+// ensureAdminFromEnv makes MCM_ADMIN_NAME a manager whose password is
+// MCM_ADMIN_PASSWORD, on every start. Without it, the first person to enter a
+// manager password after a data wipe becomes the manager.
+func ensureAdminFromEnv(st *Store) error {
+	raw, pw := os.Getenv("MCM_ADMIN_NAME"), os.Getenv("MCM_ADMIN_PASSWORD")
+	if raw == "" && pw == "" {
+		return nil
+	}
+	name := normalizeName(raw)
+	if name == "" || !nameRe.MatchString(name) || !validPassword(pw) {
+		return errors.New("set both: a name, and a password of at least 4 characters")
+	}
+	u, err := st.FindOrCreateUser(name)
+	if err != nil {
+		return err
+	}
+	same := u.PassHash != "" && bcrypt.CompareHashAndPassword([]byte(u.PassHash), []byte(pw)) == nil
+	hash := u.PassHash
+	if !same {
+		if hash, err = hashPassword(pw); err != nil {
+			return err
+		}
+	}
+	return st.UpdateUser(u.ID, func(x *User) { x.Role, x.Active, x.PassHash = "admin", true, hash })
+}
