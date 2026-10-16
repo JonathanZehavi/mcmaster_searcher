@@ -85,6 +85,8 @@ jobs:
           docker run -d --name app --network host \
             -e MCM_BASE_URL=http://127.0.0.1:8765 -e MCM_MIN_INTERVAL=0 -e MCM_NO_WARMUP=1 \
             mcmaster-orders
+          # Both must answer first: "go run" compiles the fake site, which can take a while.
+          for i in $(seq 1 90); do curl -fs -o /dev/null http://127.0.0.1:8765/ && break; sleep 1; done
           for i in $(seq 1 30); do curl -fs http://127.0.0.1:8642/api/ping && break; sleep 1; done
           curl -fs -c jar -H 'Content-Type: application/json' -d '{"name":"CI_Bot"}' http://127.0.0.1:8642/api/identify
           out=$(curl -fs -b jar 'http://127.0.0.1:8642/api/lookup?pn=8336N108')

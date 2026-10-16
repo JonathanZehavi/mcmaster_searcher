@@ -281,6 +281,11 @@ func TestLoginWallUsesDataCallsThenFastPath(t *testing.T) {
 	if p.Unit != "Each" || len(p.Tiers) != 1 || p.Tiers[0] != (PriceTier{Min: 1, Max: 0, Price: 0.88}) {
 		t.Fatalf("direct result: %+v", p)
 	}
+	if rec, _ := filepath.Glob(filepath.Join(s.DebugDir, "7129K22-*-network.json")); len(rec) != 1 {
+		t.Fatalf("the fast path must save both answers for the debug files: %v", rec)
+	} else if b, _ := os.ReadFile(rec[0]); !strings.Contains(string(b), "displayImage") || !strings.Contains(string(b), "Brass Hex Nut") {
+		t.Fatalf("recording lacks an answer: %s", b)
+	}
 
 	// An unknown part number falls back to the page (and fails) but keeps the fast path.
 	if _, err := s.Lookup("1111A11"); err == nil {

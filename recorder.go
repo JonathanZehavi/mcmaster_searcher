@@ -154,15 +154,20 @@ func (r *netRecorder) save(dir, pageURL, outcome string) string {
 	for _, id := range r.order {
 		entries = append(entries, r.byID[id])
 	}
+	defer r.mu.Unlock()
+	return writeRecording(dir, r.pn, pageURL, outcome, entries)
+}
+
+// writeRecording saves one recording (see save) and prunes old ones.
+func writeRecording(dir, pn, pageURL, outcome string, entries []*netEntry) string {
 	b, err := json.MarshalIndent(map[string]any{
-		"part_number": r.pn, "page": pageURL, "outcome": outcome,
+		"part_number": pn, "page": pageURL, "outcome": outcome,
 		"recorded_at": time.Now().Format(time.RFC3339), "requests": entries,
 	}, "", "  ")
-	r.mu.Unlock()
 	if err != nil {
 		return ""
 	}
-	name := fmt.Sprintf("%s-%s%s", r.pn, time.Now().Format("20060102-150405"), recFileSuffix)
+	name := fmt.Sprintf("%s-%s%s", pn, time.Now().Format("20060102-150405"), recFileSuffix)
 	if os.WriteFile(filepath.Join(dir, name), b, 0o644) != nil {
 		return ""
 	}

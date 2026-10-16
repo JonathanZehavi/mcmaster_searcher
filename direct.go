@@ -41,14 +41,24 @@ const mvFromPageJS = `(() => {
 	return m ? m[1] : "";
 })()`
 
-// directJS asks the product data call and returns its status and text.
-// %s: the URL (a JSON string).
-const directJS = `(async (u) => {
-	try {
-		const r = await fetch(u, { credentials: "include" });
-		return { status: r.status, text: await r.text() };
-	} catch (e) { return { status: 0, text: String(e) }; }
-})(%s)`
+// directJS asks both data calls and returns their status and text. The
+// product details come from the first; the second (product content: specs,
+// selectable options) is only saved for the debug files, so it gets a short
+// time limit and never delays the answer much.
+// %s: the two URLs (JSON strings).
+const directJS = `(async (infoURL, contentURL) => {
+	const get = async (u, ms) => {
+		const ctl = new AbortController();
+		const timer = ms ? setTimeout(() => ctl.abort(), ms) : 0;
+		try {
+			const r = await fetch(u, { credentials: "include", signal: ctl.signal });
+			return { status: r.status, text: await r.text() };
+		} catch (e) { return { status: 0, text: String(e) }; }
+		finally { clearTimeout(timer); }
+	};
+	const [info, content] = await Promise.all([get(infoURL, 0), get(contentURL, 1500)]);
+	return { info, content };
+})(%s, %s)`
 
 const pnPlaceholder = "{PN}"
 
@@ -117,24 +127,44 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 	t0 := time.Now()
 	ctx, cancel := context.WithTimeout(s.apiTab, 15*time.Second)
 	defer cancel()
-	infoURL, _ := s.callURLs(pn)
-	var res struct {
+	infoURL, contentURL := s.callURLs(pn)
+	type answer struct {
 		Status int
 		Text   string
 	}
-	err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(directJS, jsString(infoURL)), &res,
+	var res struct{ Info, Content answer }
+	err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(directJS, jsString(infoURL), jsString(contentURL)), &res,
 		func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }))
 	if err != nil {
 		return nil, err
 	}
-	if res.Status == 401 || res.Status == 403 || wallRe.MatchString(res.Text) {
+	// Keep both answers for the debug files (managers download them): they
+	// show what McMaster sends for products with selectable options.
+	outcome := "ok"
+	defer func() {
+		var entries []*netEntry
+		for _, c := range []struct {
+			url string
+			a   answer
+		}{{infoURL, res.Info}, {contentURL, res.Content}} {
+			body := c.a.Text
+			entries = append(entries, &netEntry{URL: c.url, Method: "GET", Type: "Fetch", Status: int64(c.a.Status),
+				Size: len(body), HasPart: strings.Contains(strings.ToUpper(body), pn),
+				Body: truncate(body, recMaxBody), Truncated: len(body) > recMaxBody, At: "direct"})
+		}
+		writeRecording(s.DebugDir, pn, "(fast path)", outcome, entries)
+	}()
+	if res.Info.Status == 401 || res.Info.Status == 403 || wallRe.MatchString(res.Info.Text) {
+		outcome = "wall"
 		return nil, errWall
 	}
-	if res.Status != 200 {
-		return nil, fmt.Errorf("data call answered %d", res.Status)
+	if res.Info.Status != 200 {
+		outcome = "failed"
+		return nil, fmt.Errorf("data call answered %d", res.Info.Status)
 	}
-	p, ok := parseOrderInfo(res.Text, pn)
+	p, ok := parseOrderInfo(res.Info.Text, pn)
 	if !ok {
+		outcome = "not-product"
 		return nil, errNotProduct
 	}
 	s.lastHow = "direct"
