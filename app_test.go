@@ -99,6 +99,7 @@ var refusedOnce sync.Map
 var (
 	visitors atomic.Int32
 	expired  sync.Map
+	banned   sync.Map
 )
 
 func expiredVisitor(r *http.Request) bool {
@@ -118,9 +119,13 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/":
-			// Each new visitor gets a session number; an "expired" one is refused.
-			if _, err := r.Cookie("visitor"); err != nil {
+			// Each new visitor gets a session number. An "expired" one is
+			// refused until it loads this page again (McMaster re-authorizes
+			// it); a "banned" one stays refused.
+			if c, err := r.Cookie("visitor"); err != nil {
 				http.SetCookie(w, &http.Cookie{Name: "visitor", Value: fmt.Sprint(visitors.Add(1)), Path: "/"})
+			} else if _, ban := banned.Load(c.Value); !ban {
+				expired.Delete(c.Value)
 			}
 			http.ServeFile(w, r, "testdata/home.html")
 		case r.URL.Path == "/mv123"+orderInfoPath && expiredVisitor(r):
@@ -493,15 +498,26 @@ func TestKeepWarmRenewsRefusedSession(t *testing.T) {
 	if s.probe() != 200 {
 		t.Fatal("warm-up should leave a working session")
 	}
-	expired.Store(fmt.Sprint(visitors.Load()), true) // the session McMaster stops answering
+	// An expired session comes back by reloading McMaster in the same browser.
+	first := fmt.Sprint(visitors.Load())
+	expired.Store(first, true)
 	if s.probe() != 403 {
 		t.Fatal("the expired session should be refused")
 	}
 	s.mu.Lock()
 	s.refreshSession()
 	s.mu.Unlock()
-	if s.probe() != 200 {
-		t.Fatal("the session was not renewed")
+	if s.probe() != 200 || fmt.Sprint(visitors.Load()) != first {
+		t.Fatalf("should be renewed in the same browser: visitor %s -> %d", first, visitors.Load())
+	}
+	// A session refused for good needs a new visitor (new browser).
+	banned.Store(first, true)
+	expired.Store(first, true)
+	s.mu.Lock()
+	s.refreshSession()
+	s.mu.Unlock()
+	if s.probe() != 200 || fmt.Sprint(visitors.Load()) == first {
+		t.Fatalf("a refused visitor should be replaced: still %s", first)
 	}
 	if _, err := s.Lookup("7129K22"); err != nil || s.lastHow != "direct" {
 		t.Fatalf("after renewal the search should take the fast path: how=%s err=%v", s.lastHow, err)
@@ -513,7 +529,7 @@ func TestWorkHours(t *testing.T) {
 	for _, c := range []struct {
 		day, hour int
 		want      bool
-	}{{0, 9, true}, {4, 19, true}, {4, 21, false}, {5, 10, true}, {5, 15, false}, {6, 10, false}, {1, 5, false}} {
+	}{{0, 9, true}, {4, 21, true}, {5, 19, true}, {6, 10, true}, {1, 5, false}, {3, 23, false}} {
 		if got := workHours(at(c.day, c.hour)); got != c.want {
 			t.Errorf("day %d %d:00 = %v", c.day, c.hour, got)
 		}

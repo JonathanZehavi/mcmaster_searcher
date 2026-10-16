@@ -160,9 +160,15 @@ func (s *Scraper) lookupAny(pn string) (*Part, error) {
 	case err == nil:
 		return p, nil
 	case err == errWall:
-		// The session expired or was refused: a new visitor, warmed until
-		// McMaster answers, is usually faster than a full page load.
-		log.Printf("lookup %s: McMaster refused the data call; starting a fresh session", pn)
+		// The session expired or was refused. Cheapest first: reload the
+		// kept tab so McMaster authorizes the same visitor again; then a new
+		// visitor warmed until McMaster answers; then a full page load.
+		log.Printf("lookup %s: McMaster refused the data call; renewing the session", pn)
+		if s.reauth() {
+			if p, err := s.direct(pn); err == nil {
+				return p, nil
+			}
+		}
 		s.resetSession()
 		if s.warm() {
 			if p, err := s.direct(pn); err == nil {
@@ -258,6 +264,37 @@ func (s *Scraper) warm() bool {
 	return false
 }
 
+// reauth reloads McMaster's page in the kept tab (same browser, same
+// cookies) and waits until the data call answers again: McMaster's page
+// renews the visitor's authorization as it loads. Much faster than starting
+// a new browser on a small server.
+func (s *Scraper) reauth() bool {
+	if s.apiTab == nil || s.apiTab.Err() != nil {
+		return false
+	}
+	t0 := time.Now()
+	// A real reload, past the browser cache, so the page asks McMaster again.
+	ctx, cancel := context.WithTimeout(s.apiTab, 5*time.Second)
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
+		return page.Reload().WithIgnoreCache(true).Do(c)
+	}))
+	cancel()
+	if err != nil {
+		return false
+	}
+	for end := time.Now().Add(12 * time.Second); time.Now().Before(end); time.Sleep(time.Second) {
+		var mv string
+		if chromedp.Run(s.apiTab, chromedp.Evaluate(mvFromPageJS, &mv)) == nil && mv != "" && mv != s.mv {
+			s.mv = mv // McMaster deployed meanwhile
+		}
+		if s.probe() == 200 {
+			log.Printf("session renewed in the same browser after %.1fs", time.Since(t0).Seconds())
+			return true
+		}
+	}
+	return false
+}
+
 // probePN is any real part number; asking for it tells whether McMaster
 // still answers this session's data calls.
 const probePN = "91251A540"
@@ -307,6 +344,9 @@ func (s *Scraper) refreshSession() {
 		return
 	}
 	log.Printf("keep-warm: data call answered %d; renewing the McMaster session", st)
+	if s.reauth() {
+		return
+	}
 	s.resetSession()
 	if !s.warm() {
 		s.resetSession()
@@ -314,18 +354,12 @@ func (s *Scraper) refreshSession() {
 	}
 }
 
-// workHours: Sunday to Thursday 6:00-20:00, Friday 6:00-14:00 (server time;
-// render.yaml sets Asia/Jerusalem).
+// workHours: every day 6:00-23:00 (server time; render.yaml sets
+// Asia/Jerusalem). People search on Fridays and evenings too; at night one
+// slow first search is fine.
 func workHours(t time.Time) bool {
 	h := t.Hour()
-	switch t.Weekday() {
-	case time.Saturday:
-		return false
-	case time.Friday:
-		return h >= 6 && h < 14
-	default:
-		return h >= 6 && h < 20
-	}
+	return h >= 6 && h < 23
 }
 
 // resetSession makes the next request come from a new anonymous visitor: the
