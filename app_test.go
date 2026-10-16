@@ -104,7 +104,16 @@ func fakeMcMaster(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "text/html")
 			w.Write([]byte(wallHTML))
 		case r.URL.Path == "/mv123"+orderInfoPath && r.URL.Query().Get("partNumber") == "7856K41":
-			http.ServeFile(w, r, "testdata/7856K41-orderinfo.json") // recorded from the real site
+			// Recorded from the real site; without the page's feature flags
+			// the choices are left out (as the real site seems to do).
+			b, _ := os.ReadFile("testdata/7856K41-orderinfo.json")
+			if !strings.Contains(r.URL.Query().Get("features"), "enablemnitpns") {
+				var m map[string]any
+				json.Unmarshal(b, &m)
+				delete(m, "easyToOrderModel")
+				b, _ = json.Marshal(m)
+			}
+			w.Write(b)
 		case r.URL.Path == "/mv123"+orderInfoPath && fakeVariant(r.URL.Query().Get("partNumber")) != "":
 			w.Write([]byte(fakeVariant(r.URL.Query().Get("partNumber"))))
 		case r.URL.Path == "/mv123"+orderInfoPath:

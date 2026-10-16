@@ -24,6 +24,7 @@ import (
 var (
 	errNoFastPath = errors.New("fast path not ready")
 	errNotProduct = errors.New("the data call did not return product details")
+	errIncomplete = errors.New("the data call answered without a price or choices")
 	// errWall: McMaster answered with its "please log in to continue
 	// browsing" wall (an anonymous session that has seen too many pages).
 	errWall = errors.New("McMaster asks to log in to continue browsing")
@@ -95,7 +96,14 @@ func (s *Scraper) rememberCallForms(pn, infoURL, contentURL string) {
 // callURLs gives the two data call URLs for pn.
 func (s *Scraper) callURLs(pn string) (string, string) {
 	if s.infoTmpl != "" && s.contentTmpl != "" {
-		return strings.ReplaceAll(s.infoTmpl, pnPlaceholder, pn), strings.ReplaceAll(s.contentTmpl, pnPlaceholder, pn)
+		info, content := strings.ReplaceAll(s.infoTmpl, pnPlaceholder, pn), strings.ReplaceAll(s.contentTmpl, pnPlaceholder, pn)
+		if !strings.Contains(info, "features=") {
+			info += "&features=" + orderInfoFeatures
+		}
+		if !strings.Contains(content, "features=") {
+			content += "&features=" + contentFeatures
+		}
+		return info, content
 	}
 	// Not seen yet (fresh warm-up): the form McMaster's page uses.
 	events, _ := json.Marshal([]map[string]any{{
@@ -104,8 +112,16 @@ func (s *Scraper) callURLs(pn string) (string, string) {
 	}})
 	q := "?partNumber=" + pn + "&clientNavigationEvents=" + string(events)
 	base := s.BaseURL + "/" + s.mv
-	return base + orderInfoPath + q, base + contentPath + q
+	return base + orderInfoPath + q + "&features=" + orderInfoFeatures, base + contentPath + q + "&features=" + contentFeatures
 }
+
+// The feature flags McMaster's own page sends with the data calls (recorded
+// 2026-10-16). Without them the answer leaves out a product's choices
+// (easyToOrderModel: length, color …).
+const (
+	orderInfoFeatures = "enableetorightclick,enablemnitpns,enablerewriteetoeventchain,showoperatorcomponentinpdurl,sortsequencedpfattributevaluesfirst"
+	contentFeatures   = "enablemnitpns,enablerewriteetoeventchain,rtrvcadviarps"
+)
 
 func (s *Scraper) absURL(p string) string {
 	if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
@@ -166,6 +182,12 @@ func (s *Scraper) direct(pn string) (*Part, error) {
 	if !ok {
 		outcome = "not-product"
 		return nil, errNotProduct
+	}
+	if len(p.Tiers) == 0 && len(p.Choices) == 0 && !strings.Contains(res.Info.Text, "easyToOrderModel") {
+		// No price and no choices: the answer is missing a part (as when the
+		// feature flags were left out). The page's own call gets all of it.
+		outcome = "incomplete"
+		return nil, errIncomplete
 	}
 	s.lastHow = "direct"
 	log.Printf("lookup %s: %.2fs via the site's data call (no page load); %d price tiers",

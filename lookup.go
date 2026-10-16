@@ -161,6 +161,8 @@ func (s *Scraper) lookupAny(pn string) (*Part, error) {
 	case err == errWall:
 		log.Printf("lookup %s: McMaster's login wall on the data call; starting a fresh session", pn)
 		s.resetSession()
+	case err == errIncomplete:
+		log.Printf("lookup %s: the data call left out the price and choices; loading the page", pn)
 	case err != errNoFastPath && err != errNotProduct:
 		log.Printf("lookup %s: direct data call failed (%v); loading the page instead", pn, err)
 		s.closeAPITab()
